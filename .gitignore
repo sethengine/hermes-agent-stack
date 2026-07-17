@@ -1,0 +1,14 @@
+# Redacted secrets
+*.token
+*.key
+*secret*
+
+# Cache
+__pycache__/
+*.pyc
+.cache/
+
+# IDE
+.idea/
+.vscode/
+*.swp

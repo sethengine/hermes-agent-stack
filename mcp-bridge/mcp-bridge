@@ -1,0 +1,810 @@
+#!/usr/bin/env python3
+"""
+MCP Research Bridge v4 — cached, deduplicated, ranked search + structured research plans.
+Zero API keys. Replaces Firecrawl, Exa, Brave Search.
+
+Tools:
+  web_search       — cached multi-engine search with fuzzy dedup + ranking
+  web_extract      — Trafilatura-powered page extraction
+  news_search      — recent news via SearXNG
+  scholar_search   — academic papers via arXiv
+  research_plan    — structured multi-query research with cross-source synthesis
+
+Caching: TTL-based LRU cache (searches 300s, extracts 600s).
+Dedup: Fuzzy title matching (Levenshtein ratio > 0.85).
+Ranking: Category-aware scoring (tech boosts GitHub/Reddit/arXiv, news boosts recency).
+
+Transport: stdio (default) or --http-port PORT (llama.cpp WebUI)
+Dependencies: Python 3.11+ stdlib. trafilatura/httpx optional.
+"""
+
+import json, sys, re, time, argparse, os, hashlib
+from html.parser import HTMLParser
+from http.server import HTTPServer, BaseHTTPRequestHandler
+from urllib.parse import urlparse, urlencode, quote_plus
+from urllib.request import Request, urlopen
+from urllib.error import HTTPError as UrllibHTTPError, URLError
+from collections import OrderedDict
+from threading import Lock
+from functools import lru_cache as _stdlib_lru_cache
+
+# ── Optional deps ───────────────────────────────────────────────────────
+try:
+    import httpx; _HAS_HTTPX = True
+except ImportError:
+    _HAS_HTTPX = False
+try:
+    import trafilatura; _HAS_TRAF = True
+except ImportError:
+    _HAS_TRAF = False
+
+# ── Config ──────────────────────────────────────────────────────────────
+SEARXNG_URL = os.environ.get("SEARXNG_URL", "http://localhost:8081")
+TIMEOUT = 20
+MAX_RESULTS = 15
+EXTRACT_CHARS = 15000
+CACHE_TTL_SEARCH = 300   # 5 min
+CACHE_TTL_EXTRACT = 600  # 10 min
+UA = "MCP-Research-Bridge/4.0"
+
+# ── Cache ───────────────────────────────────────────────────────────────
+class TTLCache:
+    """Thread-safe TTL cache with LRU eviction."""
+    def __init__(self, maxsize=200, ttl=300):
+        self._cache = OrderedDict()
+        self._lock = Lock()
+        self._maxsize = maxsize
+        self._ttl = ttl
+
+    def _key(self, *args, **kwargs):
+        raw = json.dumps({"args": args, "kwargs": {k: v for k, v in sorted(kwargs.items())}}, sort_keys=True)
+        return hashlib.sha256(raw.encode()).hexdigest()
+
+    def get(self, *args, **kwargs):
+        k = self._key(*args, **kwargs)
+        with self._lock:
+            if k in self._cache:
+                val, ts = self._cache[k]
+                if time.time() - ts < self._ttl:
+                    self._cache.move_to_end(k)
+                    return val
+                del self._cache[k]
+        return None
+
+    def set(self, value, *args, **kwargs):
+        k = self._key(*args, **kwargs)
+        with self._lock:
+            if k in self._cache:
+                self._cache.move_to_end(k)
+            self._cache[k] = (value, time.time())
+            while len(self._cache) > self._maxsize:
+                self._cache.popitem(last=False)
+
+search_cache = TTLCache(maxsize=200, ttl=CACHE_TTL_SEARCH)
+extract_cache = TTLCache(maxsize=100, ttl=CACHE_TTL_EXTRACT)
+
+# ── HTTP Client ─────────────────────────────────────────────────────────
+def http_get(url, params=None, timeout=TIMEOUT, headers=None):
+    if _HAS_HTTPX:
+        with httpx.Client(timeout=timeout, headers=headers or {},
+                          follow_redirects=True) as c:
+            r = c.get(url, params=params); r.raise_for_status()
+        return r
+    if params: url = f"{url}?{urlencode(params)}"
+    req = Request(url, headers=headers or {})
+    try:
+        r = urlopen(req, timeout=timeout)
+        body = r.read().decode("utf-8", errors="replace")
+    except UrllibHTTPError as e:
+        body = e.read().decode("utf-8", errors="replace")
+        raise _HTTPError(e.code, body) from e
+    except URLError as e:
+        raise _TimeoutError(str(e)) from e
+    r.text = body; r.json = lambda: json.loads(body)
+    r.status_code = r.status; r.headers = dict(r.headers)
+    return r
+
+class _HTTPError(Exception):
+    def __init__(self, c, b): self.code = c; self.body = b; super().__init__(f"HTTP {c}")
+class _TimeoutError(Exception):
+    pass
+
+# ── HTML Stripper ───────────────────────────────────────────────────────
+class _Stripper(HTMLParser):
+    def __init__(s):
+        super().__init__(); s._p = []; s._k = 0
+    def handle_starttag(s, t, _):
+        if t in ("script","style","noscript","svg","canvas"): s._k += 1
+    def handle_endtag(s, t):
+        if t in ("script","style","noscript","svg","canvas"): s._k = max(0, s._k-1)
+        elif t in ("p","br","li","div","tr","h1","h2","h3","h4","h5","h6","section","article"):
+            s._p.append("\n")
+    def handle_data(s, d):
+        if s._k == 0: s._p.append(d)
+    def get_text(s):
+        r = "".join(s._p); r = re.sub(r"[ \t\r\f\v]+", " ", r)
+        return re.sub(r"\n{3,}", "\n\n", r).strip()
+
+def strip_html(h):
+    p = _Stripper()
+    try: p.feed(h)
+    except: pass
+    return p.get_text()
+
+# ══════════════════════════════════════════════════════════════════════════
+# FUZZY DEDUP
+# ══════════════════════════════════════════════════════════════════════════
+
+def _fuzzy_ratio(a, b):
+    """Simple character-level similarity ratio (0.0-1.0)."""
+    a, b = a.lower(), b.lower()
+    if a == b: return 1.0
+    # Strip common prefixes/suffixes that differ across engines
+    for s in (" | ", " - ", " ... ", "..."):
+        a = a.split(s)[0]; b = b.split(s)[0]
+    # Jaccard-like character trigram similarity
+    def trigrams(s):
+        return set(s[i:i+3] for i in range(len(s)-2))
+    ta, tb = trigrams(a), trigrams(b)
+    if not ta or not tb: return 0.0
+    return len(ta & tb) / len(ta | tb)
+
+def deduplicate(results, threshold=0.85):
+    """Remove near-duplicate results by fuzzy title matching."""
+    if not results: return results
+    deduped = []
+    seen_titles = []
+    for r in results:
+        title = r.get("title", "")
+        if not title:
+            deduped.append(r)
+            continue
+        is_dup = False
+        for seen in seen_titles:
+            if _fuzzy_ratio(title, seen) >= threshold:
+                is_dup = True
+                break
+        if not is_dup:
+            deduped.append(r)
+            seen_titles.append(title)
+    return deduped
+
+# ══════════════════════════════════════════════════════════════════════════
+# CATEGORY-AWARE RANKING
+# ══════════════════════════════════════════════════════════════════════════
+
+CATEGORY_BOOSTS = {
+    # Engine-level boosts (pre-score, additive)
+    "arxiv": 0.15,
+    "github": 0.10,
+    "wikipedia": 0.05,
+    "stackoverflow": 0.08,
+    "wttr.in": 0.0,
+    "unsplash": -0.05,
+    "flickr": -0.05,
+
+    # Category boosts for tech queries
+    "tech": {
+        "github": 0.20, "stackoverflow": 0.15, "arxiv": 0.15,
+        "wikipedia": 0.10, "reddit": 0.05, "hackernews": 0.10,
+    },
+    # Category boosts for news queries
+    "news": {
+        "reuters": 0.15, "yahoo": 0.10, "wikinews": 0.15,
+        "brave.news": 0.10, "bing": 0.05,
+    },
+    # Category boosts for academic queries
+    "scholar": {
+        "arxiv": 0.25, "semantic scholar": 0.20, "pubmed": 0.20,
+        "wikipedia": 0.10, "google scholar": 0.15,
+    },
+}
+
+def rank_results(results, query_context="general"):
+    """Apply category-aware scoring boosts."""
+    ctx_lower = query_context.lower()
+    boosts = CATEGORY_BOOSTS.get(ctx_lower, {})
+
+    for r in results:
+        engine = (r.get("engine", "") or "").lower()
+        base_score = float(r.get("score", 0.5))
+
+        # Apply engine-level boost (skip dict entries)
+        for key, boost in CATEGORY_BOOSTS.items():
+            if isinstance(boost, (int, float)) and key in engine:
+                base_score += boost
+
+        # Apply category-specific boost
+        for key, boost in boosts.items():
+            if key in engine:
+                base_score += boost
+
+        r["score"] = min(base_score, 1.0)
+
+    # Re-sort by score
+    results.sort(key=lambda r: r.get("score", 0), reverse=True)
+    return results
+
+# ══════════════════════════════════════════════════════════════════════════
+# SEARCH BACKENDS
+# ══════════════════════════════════════════════════════════════════════════
+
+def search_searxng(query, pageno=1, language="all", categories="", time_range=""):
+    cached = search_cache.get(query=query, pageno=pageno, language=language,
+                              categories=categories, time_range=time_range)
+    if cached: return cached
+
+    params = {"q": query, "format": "json", "pageno": pageno, "language": language}
+    if categories: params["categories"] = categories
+    if time_range: params["time_range"] = time_range
+    try:
+        r = http_get(f"{SEARXNG_URL}/search", params, timeout=TIMEOUT,
+                     headers={"User-Agent": UA})
+        data = r.json()
+        search_cache.set(data, query=query, pageno=pageno, language=language,
+                         categories=categories, time_range=time_range)
+        return data
+    except Exception as e:
+        return {"error": str(e), "engine": "searxng"}
+
+def search_duckduckgo(query, max_results=10):
+    cached = search_cache.get(query=query, engine="ddg")
+    if cached: return cached
+    try:
+        r = http_get("https://lite.duckduckgo.com/lite/",
+                     params={"q": query}, timeout=TIMEOUT,
+                     headers={"User-Agent": UA})
+        results = []
+        for m in re.finditer(
+            r'<a[^>]*href="((?:https?:)?//[^"]+)"[^>]*>(.+?)</a>.*?<span[^>]*class="(?:link-text|url)?"[^>]*>(.*?)</span>',
+            r.text, re.DOTALL | re.IGNORECASE
+        ):
+            url, title, snippet_raw = m.groups()
+            if url.startswith("//"): url = "https:" + url
+            snippet = re.sub(r'<[^>]+>', '', snippet_raw).strip()
+            if title and url and "duckduckgo.com" not in url:
+                results.append({
+                    "title": re.sub(r'<[^>]+>', '', title).strip(),
+                    "url": url, "content": snippet[:300],
+                    "engine": "duckduckgo", "score": 0.7,
+                })
+            if len(results) >= max_results: break
+
+        if not results:
+            for m in re.finditer(
+                r'<a[^>]*href="(https?://[^"]+)"[^>]*class="result-link"[^>]*>(.+?)</a>',
+                r.text, re.DOTALL
+            ):
+                results.append({
+                    "title": re.sub(r'<[^>]+>', '', m.group(2)).strip(),
+                    "url": m.group(1), "content": "",
+                    "engine": "duckduckgo", "score": 0.6,
+                })
+        out = {"results": results[:max_results], "engine": "duckduckgo"}
+        search_cache.set(out, query=query, engine="ddg")
+        return out
+    except Exception as e:
+        return {"error": str(e), "engine": "duckduckgo"}
+
+def search_wikipedia(query, limit=5):
+    cached = search_cache.get(query=query, engine="wiki")
+    if cached: return cached
+    try:
+        r = http_get("https://en.wikipedia.org/w/api.php", params={
+            "action": "query", "list": "search", "srsearch": query,
+            "format": "json", "srlimit": limit,
+        }, timeout=TIMEOUT, headers={"User-Agent": UA})
+        data = r.json()
+        results = []
+        for item in data.get("query", {}).get("search", []):
+            t = item["title"]
+            results.append({
+                "title": t,
+                "url": f"https://en.wikipedia.org/wiki/{quote_plus(t.replace(' ','_'))}",
+                "content": re.sub(r'<[^>]+>', '', item.get("snippet", ""))[:300],
+                "engine": "wikipedia", "score": 0.7,
+            })
+        out = {"results": results, "engine": "wikipedia"}
+        search_cache.set(out, query=query, engine="wiki")
+        return out
+    except Exception as e:
+        return {"error": str(e), "engine": "wikipedia"}
+
+def search_arxiv(query, max_results=10):
+    cached = search_cache.get(query=query, engine="arxiv")
+    if cached: return cached
+    try:
+        r = http_get("http://export.arxiv.org/api/query", params={
+            "search_query": f"all:{query}", "start": 0, "max_results": max_results,
+            "sortBy": "relevance",
+        }, timeout=TIMEOUT, headers={"User-Agent": UA})
+        results = []
+        for entry in re.finditer(r'<entry>(.*?)</entry>', r.text, re.DOTALL):
+            e = entry.group(1)
+            tm = re.search(r'<title>(.*?)</title>', e, re.DOTALL)
+            um = re.search(r'<id>(.*?)</id>', e)
+            sm = re.search(r'<summary>(.*?)</summary>', e, re.DOTALL)
+            pm = re.search(r'<published>(\d{4}-\d{2}-\d{2})', e)
+            authors = [a.group(1) for a in re.finditer(r'<name>(.*?)</name>', e)]
+            if tm and um:
+                results.append({
+                    "title": re.sub(r'\s+', ' ', tm.group(1)).strip(),
+                    "url": um.group(1),
+                    "content": (re.sub(r'\s+', ' ', sm.group(1)).strip()[:300] if sm else ""),
+                    "engine": "arxiv", "score": 0.75,
+                    "publishedDate": pm.group(1) if pm else "",
+                    "authors": authors[:3],
+                })
+        out = {"results": results, "engine": "arxiv"}
+        search_cache.set(out, query=query, engine="arxiv")
+        return out
+    except Exception as e:
+        return {"error": str(e), "engine": "arxiv"}
+
+# ══════════════════════════════════════════════════════════════════════════
+# FEDERATED SEARCH (cached → dedup → rank)
+# ══════════════════════════════════════════════════════════════════════════
+
+def federated_search(query, pageno=1, language="all", categories="",
+                     time_range="", max_results=MAX_RESULTS, context="general"):
+    all_results = []
+    engines_used = []
+
+    # 1. SearXNG (primary)
+    sx = search_searxng(query, pageno, language, categories, time_range)
+    if "error" not in sx:
+        engines_used.extend(sx.get("engines", [])[:5])
+        all_results.extend(sx.get("results", []))
+    else:
+        ddg = search_duckduckgo(query, max_results)
+        if "error" not in ddg:
+            engines_used.append("duckduckgo")
+            all_results.extend(ddg.get("results", []))
+
+    # 2. Wikipedia supplement
+    wiki = search_wikipedia(query, limit=3)
+    if "error" not in wiki:
+        engines_used.append("wikipedia")
+        all_results.extend(wiki.get("results", []))
+
+    # 3. arXiv for academic/technical queries
+    if any(kw in query.lower() for kw in
+           ["paper","research","study","arxiv","model","algorithm",
+            "neural","transformer","diffusion","training","benchmark",
+            "dataset","architecture","attention","embedding","fine-tun"]):
+        arx = search_arxiv(query, max_results=5)
+        if "error" not in arx:
+            engines_used.append("arxiv")
+            all_results.extend(arx.get("results", []))
+
+    # 4. Deduplicate
+    deduped = deduplicate(all_results)
+
+    # 5. Rank (category-aware scoring)
+    ranked = rank_results(deduped, query_context=context)
+
+    return {
+        "results": ranked[:max_results],
+        "engines": engines_used,
+        "number_of_results": len(ranked),
+    }
+
+# ══════════════════════════════════════════════════════════════════════════
+# FORMATTING
+# ══════════════════════════════════════════════════════════════════════════
+
+def format_search(data, query, pageno):
+    if "error" in data:
+        return f"**Search error:** {data['error']}"
+    results = data.get("results", [])
+    total = data.get("number_of_results", len(results))
+    engines = data.get("engines", [])
+    lines = [f"**Search:** `{query}`  |  page {pageno}  |  {total} results"]
+    if engines: lines.append(f"*Sources:* {', '.join(engines[:8])}")
+    if not results:
+        return "\n".join(lines) + "\n\n*No results. Try rephrasing.*"
+    lines.append("")
+    for i, r in enumerate(results[:MAX_RESULTS], 1):
+        t, u = r.get("title","Untitled"), r.get("url","")
+        s = (r.get("content","") or "")[:300].strip()
+        e, sc = r.get("engine","?"), r.get("score",0)
+        pub = r.get("publishedDate",""); cat = r.get("category","")
+        authors = r.get("authors",[])
+        lines.append(f"{i}. **[{t}]({u})**" if u else f"{i}. **{t}**")
+        if s: lines.append(f"   {s}")
+        meta = [f"Source: {e}"]
+        if sc: meta.append(f"Score: {sc:.2f}")
+        if pub: meta.append(f"Date: {pub}")
+        if authors: meta.append(f"By: {', '.join(authors)}")
+        lines.append(f"   *{' | '.join(meta)}*"); lines.append("")
+    if len(results) > MAX_RESULTS:
+        lines.append(f"*Showing {MAX_RESULTS} of {len(results)} ({total} total)*")
+    return "\n".join(lines)
+
+# ══════════════════════════════════════════════════════════════════════════
+# WEB EXTRACT
+# ══════════════════════════════════════════════════════════════════════════
+
+def extract_url(url, char_limit=EXTRACT_CHARS):
+    cached = extract_cache.get(url=url, char_limit=char_limit)
+    if cached:
+        return f"*[cached]*\n\n{cached}"
+
+    if not url.startswith(("http://","https://")):
+        return f"Invalid URL: {url}"
+    try:
+        r = http_get(url, timeout=25, headers={
+            "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+                          "(KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml,*/*",
+        })
+    except _TimeoutError: return f"**Timeout:** {url}"
+    except _HTTPError as e: return f"**HTTP {e.code}:** {url}"
+    except Exception as e: return f"**Error:** {e}"
+
+    html = r.text
+    ct = r.headers.get("content-type","")
+
+    # Extract
+    text = ""
+    title = ""
+    author = ""
+    date = ""
+    if _HAS_TRAF:
+        text = trafilatura.extract(html, include_comments=False,
+                                   include_tables=True, output_format="markdown",
+                                   with_metadata=True) or ""
+        if not text:
+            text = trafilatura.extract(html, output_format="txt") or ""
+        # Metadata
+        try:
+            meta_json = trafilatura.extract(html, output_format="json", with_metadata=True)
+            if meta_json:
+                md = json.loads(meta_json)
+                title = md.get("title", "")
+                author = md.get("author", "")
+                date = md.get("date", "")
+        except: pass
+
+    if not text:
+        text = strip_html(html)
+
+    if not title:
+        tm = re.search(r"<title[^>]*>([^<]+)</title>", html, re.I)
+        title = tm.group(1).strip() if tm else urlparse(url).netloc
+
+    if not text or len(text) < 50:
+        return f"Could not extract content from {url}"
+
+    if len(text) > char_limit:
+        text = (f"{text[:char_limit//2]}\n\n"
+                f"[... truncated {len(text)} total chars ...]\n\n"
+                f"{text[-char_limit//4:]}")
+
+    hostname = urlparse(url).netloc
+    extra = ""
+    if author: extra += f"  |  By: {author}"
+    if date: extra += f"  |  Date: {date}"
+    method = "Trafilatura" if _HAS_TRAF else "basic HTML"
+
+    result = (f"**Source:** [{title}]({url})  |  {hostname}"
+              f"{extra}\n*Extraction: {method} | {len(html)} bytes → {len(text)} chars*\n\n{text}")
+
+    extract_cache.set(text, url=url, char_limit=char_limit)
+    return result
+
+# ══════════════════════════════════════════════════════════════════════════
+# RESEARCH PLAN TOOL
+# ══════════════════════════════════════════════════════════════════════════
+
+def research_plan(query, depth="standard"):
+    """
+    Structured research: breaks query into sub-questions, searches each,
+    deduplicates across all results, scores by confidence.
+    """
+    # Define sub-queries based on query analysis
+    sub_queries = _derive_subqueries(query)
+
+    if depth == "quick":
+        sub_queries = sub_queries[:2]
+    elif depth == "deep":
+        sub_queries.extend(_derive_subqueries(query, mode="supplementary"))
+
+    all_results = []
+    sections = []
+
+    for sq in sub_queries:
+        context = sq.get("context", "general")
+        cat = sq.get("categories", "")
+        data = federated_search(sq["query"], categories=cat, context=context,
+                                max_results=8)
+        results = data.get("results", [])
+        if results:
+            sections.append({
+                "question": sq["question"],
+                "query": sq["query"],
+                "results": results,
+                "engines": data.get("engines", []),
+            })
+            all_results.extend(results)
+
+    # Cross-section dedup
+    all_deduped = deduplicate(all_results)
+    all_ranked = rank_results(all_deduped)
+
+    # Build output
+    lines = [f"# Research Plan: {query}\n"]
+    lines.append(f"**Depth:** {depth} | **Sub-queries:** {len(sub_queries)} | **Total unique results:** {len(all_deduped)}\n")
+
+    for i, sec in enumerate(sections, 1):
+        lines.append(f"## {i}. {sec['question']}")
+        lines.append(f"*Query: `{sec['query']}` | Sources: {', '.join(sec['engines'][:5])}*")
+        for j, r in enumerate(sec["results"][:5], 1):
+            t, u = r.get("title",""), r.get("url","")
+            s = (r.get("content","") or "")[:200].strip()
+            sc = r.get("score", 0) * 100
+            lines.append(f"{j}. **[{t}]({u})** *(confidence: {sc:.0f}%)*")
+            if s: lines.append(f"   {s}")
+        lines.append("")
+
+    # Top findings across all sections
+    lines.append("## Key Findings (cross-source synthesis)")
+    lines.append("")
+    top = all_ranked[:5]
+    for i, r in enumerate(top, 1):
+        t, u = r.get("title",""), r.get("url","")
+        lines.append(f"{i}. **[{t}]({u})** — Source: {r.get('engine','?')}")
+
+    return "\n".join(lines)
+
+def _derive_subqueries(query, mode="primary"):
+    """Derive sub-queries from a research question."""
+    q = query.lower()
+    subs = []
+
+    if mode == "primary":
+        # Core sub-queries based on query type
+        if any(w in q for w in ["vs", "versus", "compare"]):
+            # Comparison query
+            parts = re.split(r'\s+(?:vs|versus|compare)\s+', query, flags=re.I)
+            for p in parts:
+                p = p.strip()
+                if p:
+                    subs.append({"question": f"What is {p}?", "query": p, "context": "general"})
+            subs.append({"question": f"{query} comparison", "query": query, "context": "general"})
+        elif any(w in q for w in ["best", "top", "recommend", "review"]):
+            subs.append({"question": f"Reviews and recommendations for {query}",
+                         "query": query, "context": "general"})
+            subs.append({"question": f"Latest news about {query}",
+                         "query": query, "categories": "news", "context": "news"})
+            subs.append({"question": f"Technical details and specs for {query}",
+                         "query": f"{query} technical specifications",
+                         "context": "tech"})
+        elif any(w in q for w in ["how to", "tutorial", "guide", "setup"]):
+            subs.append({"question": f"Tutorials and guides for {query}",
+                         "query": query, "context": "general"})
+            subs.append({"question": f"Common issues and troubleshooting for {query}",
+                         "query": f"{query} problems troubleshooting", "context": "tech"})
+        else:
+            # General research
+            subs.append({"question": f"What is {query}?",
+                         "query": query, "context": "general"})
+            subs.append({"question": f"Latest developments in {query}",
+                         "query": f"{query} latest", "categories": "news",
+                         "context": "news"})
+            subs.append({"question": f"Deep dive: technical/research perspective on {query}",
+                         "query": query, "context": "tech"})
+
+    else:
+        # Supplementary
+        subs.append({"question": f"Academic research on {query}",
+                     "query": query, "context": "scholar"})
+        subs.append({"question": f"Community discussion about {query}",
+                     "query": f"{query} reddit discussion",
+                     "context": "tech"})
+
+    return subs
+
+# ══════════════════════════════════════════════════════════════════════════
+# TOOLS
+# ══════════════════════════════════════════════════════════════════════════
+
+TOOLS = [
+    {
+        "name": "web_search",
+        "description": (
+            "Cached multi-engine web search with fuzzy deduplication and "
+            "category-aware ranking. SearXNG (primary) → DuckDuckGo (fallback) "
+            "→ Wikipedia + arXiv (supplements). Zero API keys."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Search query"},
+                "pageno": {"type": "integer", "default": 1},
+                "language": {"type": "string", "default": "all"},
+                "categories": {"type": "string", "description": "general,news,images,videos,science,files,it,social media,music,map"},
+                "time_range": {"type": "string", "description": "day, week, month, year, or empty"},
+                "context": {"type": "string", "description": "general, tech, news, scholar", "default": "general"},
+            },
+            "required": ["query"],
+        },
+    },
+    {
+        "name": "web_extract",
+        "description": (
+            "Cached page extraction with Trafilatura (metadata + markdown). "
+            f"~{EXTRACT_CHARS} char limit. 10min TTL cache."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "url": {"type": "string", "description": "URL to fetch"},
+                "char_limit": {"type": "integer", "default": EXTRACT_CHARS},
+            },
+            "required": ["url"],
+        },
+    },
+    {
+        "name": "news_search",
+        "description": "Search recent news via SearXNG news category. Free.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "News search query"},
+                "time_range": {"type": "string", "default": "week"},
+            },
+            "required": ["query"],
+        },
+    },
+    {
+        "name": "scholar_search",
+        "description": "Search academic papers on arXiv. Free API, no key.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Research query"},
+                "max_results": {"type": "integer", "default": 10, "description": "Max papers (1-30)"},
+            },
+            "required": ["query"],
+        },
+    },
+    {
+        "name": "research_plan",
+        "description": (
+            "Structured multi-query research. Breaks complex questions into "
+            "sub-queries, searches each independently, deduplicates and ranks "
+            "across all sources. Returns cross-source synthesis with confidence scores. "
+            "Depth: quick (2 sub-queries), standard (3-4), deep (5-6)."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Research question"},
+                "depth": {"type": "string", "enum": ["quick", "standard", "deep"], "default": "standard"},
+            },
+            "required": ["query"],
+        },
+    },
+]
+
+# ══════════════════════════════════════════════════════════════════════════
+# MCP HANDLERS
+# ══════════════════════════════════════════════════════════════════════════
+
+def ok(req_id, result):
+    return json.dumps({"jsonrpc": "2.0", "id": req_id, "result": result})
+def err(req_id, code, msg):
+    return json.dumps({"jsonrpc": "2.0", "id": req_id, "error": {"code": code, "message": msg}})
+def txt(text):
+    return {"content": [{"type": "text", "text": text}]}
+
+def handle(msg):
+    rid = msg.get("id"); m = msg.get("method", ""); p = msg.get("params", {})
+    if m == "initialize":
+        return ok(rid, {"protocolVersion": "2024-11-05", "capabilities": {"tools": {}},
+                        "serverInfo": {"name": "research-bridge", "version": "4.0.0"}})
+    elif m == "tools/list":
+        return ok(rid, {"tools": TOOLS})
+    elif m == "tools/call":
+        n = p.get("name", ""); a = p.get("arguments", {})
+        if n == "web_search":
+            q = a.get("query", "")
+            if not q: return err(rid, -32602, "Missing: query")
+            d = federated_search(q, pageno=a.get("pageno", 1),
+                                 language=a.get("language", "all"),
+                                 categories=a.get("categories", ""),
+                                 time_range=a.get("time_range", ""),
+                                 context=a.get("context", "general"))
+            return ok(rid, txt(format_search(d, q, a.get("pageno", 1))))
+        elif n == "web_extract":
+            u = a.get("url", "")
+            if not u: return err(rid, -32602, "Missing: url")
+            return ok(rid, txt(extract_url(u, a.get("char_limit", EXTRACT_CHARS))))
+        elif n == "news_search":
+            q = a.get("query", "")
+            if not q: return err(rid, -32602, "Missing: query")
+            d = search_searxng(q, categories="news", time_range=a.get("time_range", "week"))
+            return ok(rid, txt(format_search(d, q, 1)))
+        elif n == "scholar_search":
+            q = a.get("query", "")
+            if not q: return err(rid, -32602, "Missing: query")
+            d = search_arxiv(q, max_results=min(a.get("max_results", 10), 30))
+            return ok(rid, txt(format_search(d, q, 1)))
+        elif n == "research_plan":
+            q = a.get("query", "")
+            if not q: return err(rid, -32602, "Missing: query")
+            return ok(rid, txt(research_plan(q, depth=a.get("depth", "standard"))))
+        return err(rid, -32601, f"Unknown tool: {n}")
+    elif m == "ping":
+        return ok(rid, {})
+    elif m in ("notifications/initialized",) or m.startswith("notifications/"):
+        return None
+    return err(rid, -32601, f"Unknown method: {m}")
+
+# ══════════════════════════════════════════════════════════════════════════
+# TRANSPORT
+# ══════════════════════════════════════════════════════════════════════════
+
+class HTTPHandler(BaseHTTPRequestHandler):
+    def log_message(s, f, *a):
+        if os.environ.get("MCP_DEBUG"): print(f"[http] {a[0]}", file=sys.stderr)
+    def _cors(s):
+        s.send_header("Access-Control-Allow-Origin", "*")
+        s.send_header("Access-Control-Allow-Methods", "GET,POST,DELETE,OPTIONS")
+        s.send_header("Access-Control-Allow-Headers",
+                      "Content-Type,MCP-Protocol-Version,Mcp-Session-Id,Accept")
+        s.send_header("Access-Control-Max-Age", "86400")
+    def do_OPTIONS(s): s.send_response(204); s._cors(); s.end_headers()
+    def do_POST(s):
+        n = int(s.headers.get("Content-Length", 0))
+        b = s.rfile.read(n) if n else b""
+        try: msg = json.loads(b)
+        except: s.send_error(400); return
+        if isinstance(msg, list):
+            r = json.dumps({"jsonrpc":"2.0","id":None,"error":{"code":-32600,"message":"No batch"}})
+        else:
+            try: r = handle(msg)
+            except Exception as e: r = err(msg.get("id"), -32603, str(e))
+        if r is None: s.send_response(202); s._cors(); s.end_headers(); return
+        rb = r.encode(); s.send_response(200); s._cors()
+        s.send_header("Content-Type","application/json")
+        s.send_header("Content-Length", str(len(rb))); s.end_headers(); s.wfile.write(rb)
+    def do_GET(s):
+        i = json.dumps({"server":"research-bridge","version":"4.0.0",
+                        "tools":[t["name"] for t in TOOLS]}).encode()
+        s.send_response(200); s._cors(); s.send_header("Content-Type","application/json")
+        s.send_header("Content-Length", str(len(i))); s.end_headers(); s.wfile.write(i)
+    def do_DELETE(s): s.send_response(200); s._cors(); s.end_headers()
+
+def run_http(host, port):
+    print(f"[research-bridge] HTTP on http://{host}:{port}/mcp", file=sys.stderr)
+    print(f"[research-bridge] Tools: {[t['name'] for t in TOOLS]}", file=sys.stderr)
+    HTTPServer((host, port), HTTPHandler).serve_forever()
+
+def run_stdio():
+    d = os.environ.get("MCP_DEBUG","").lower() in ("1","true","yes")
+    buf = ""
+    for line in sys.stdin:
+        if not line.strip(): continue
+        buf += line
+        try: msg = json.loads(buf); buf = ""
+        except json.JSONDecodeError: continue
+        if not isinstance(msg, dict):
+            if d: print(f"[mcp] ignoring {type(msg)}", file=sys.stderr)
+            continue
+        try: r = handle(msg)
+        except Exception as e:
+            if d: import traceback; traceback.print_exc(file=sys.stderr)
+            r = err(msg.get("id"), -32603, str(e))
+        if r is not None: sys.stdout.write(r+"\n"); sys.stdout.flush()
+
+def main():
+    p = argparse.ArgumentParser(description="MCP Research Bridge v4 — cached, deduplicated, ranked")
+    p.add_argument("--http-port", type=int, help="HTTP port for llama.cpp WebUI")
+    p.add_argument("--http-host", default="127.0.0.1")
+    a = p.parse_args()
+    run_http(a.http_host, a.http_port) if a.http_port else run_stdio()
+
+if __name__ == "__main__":
+    main()

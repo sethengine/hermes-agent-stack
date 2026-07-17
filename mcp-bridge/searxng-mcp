@@ -1,0 +1,547 @@
+#!/usr/bin/env python3
+"""
+SearXNG MCP Bridge — zero-dependency Python MCP server.
+Works with Hermes (stdio), OpenCode (stdio), llama.cpp WebUI (HTTP), and any MCP client.
+
+Modes:
+  Default (no args):      stdio transport for Hermes/OpenCode/Claude Desktop
+  --http-port PORT:        HTTP transport for llama.cpp WebUI, browser clients
+
+Tools:
+  searxng_web_search  — search via local SearXNG instance
+  searxng_web_extract — fetch and extract text content from URLs
+
+Dependencies: Python 3.11+ stdlib only. httpx is optional (auto-detected).
+"""
+
+import json
+import sys
+import re
+import time
+import argparse
+import os
+from html.parser import HTMLParser
+from http.server import HTTPServer, BaseHTTPRequestHandler
+from urllib.parse import urlparse, urlencode
+from urllib.request import Request, urlopen
+from urllib.error import HTTPError as UrllibHTTPError, URLError
+
+# ── Config ──────────────────────────────────────────────────────────────
+
+SEARXNG_URL = "http://localhost:8081"
+REQUEST_TIMEOUT = 25
+MAX_RESULTS = 15
+EXTRACT_CHAR_LIMIT = 15000
+EXTRACT_TIMEOUT = 20
+
+# ── Optional httpx import ───────────────────────────────────────────────
+
+try:
+    import httpx
+    _HAS_HTTPX = True
+except ImportError:
+    _HAS_HTTPX = False
+
+
+# ── HTML to text (stdlib only) ──────────────────────────────────────────
+
+class HTMLStripper(HTMLParser):
+    """Extract readable text from HTML, skipping script/style/noscript."""
+    def __init__(self):
+        super().__init__()
+        self._parts = []
+        self._skip = 0
+
+    def handle_starttag(self, tag, _attrs):
+        if tag in ("script", "style", "noscript", "svg", "canvas"):
+            self._skip += 1
+
+    def handle_endtag(self, tag):
+        if tag in ("script", "style", "noscript", "svg", "canvas"):
+            self._skip = max(0, self._skip - 1)
+        elif tag in ("p", "br", "li", "div", "tr", "h1", "h2", "h3",
+                     "h4", "h5", "h6", "section", "article"):
+            self._parts.append("\n")
+
+    def handle_data(self, data):
+        if self._skip == 0:
+            self._parts.append(data)
+
+    def get_text(self):
+        raw = "".join(self._parts)
+        raw = re.sub(r"[ \t\r\f\v]+", " ", raw)
+        raw = re.sub(r"\n{3,}", "\n\n", raw)
+        return raw.strip()
+
+
+def strip_html(html: str) -> str:
+    p = HTMLStripper()
+    try:
+        p.feed(html)
+    except Exception:
+        pass
+    return p.get_text()
+
+
+# ── HTTP Client (httpx preferred, urllib fallback) ──────────────────────
+
+def _http_get(url, params=None, timeout=20, headers=None):
+    """GET request — uses httpx if installed, urllib otherwise."""
+    if _HAS_HTTPX:
+        return _httpx_get(url, params, timeout, headers)
+    return _urllib_get(url, params, timeout, headers)
+
+
+def _httpx_get(url, params, timeout, headers):
+    with httpx.Client(timeout=timeout, headers=headers or {},
+                      follow_redirects=True) as client:
+        resp = client.get(url, params=params)
+        resp.raise_for_status()
+    return resp
+
+
+def _urllib_get(url, params, timeout, headers):
+    if params:
+        url = f"{url}?{urlencode(params)}"
+    req = Request(url, headers=headers or {})
+    try:
+        resp = urlopen(req, timeout=timeout)
+        body = resp.read().decode("utf-8", errors="replace")
+    except UrllibHTTPError as e:
+        body = e.read().decode("utf-8", errors="replace")
+        raise _HTTPError(e.code, body) from e
+    except URLError as e:
+        raise _TimeoutError(str(e)) from e
+    # Wrap in fake httpx-like object
+    resp.text = body
+    resp.json = lambda: json.loads(body)
+    resp.status_code = resp.status
+    resp.headers = dict(resp.headers) if _HAS_HTTPX else resp.headers
+    return resp
+
+
+class _HTTPError(Exception):
+    def __init__(self, status_code, body):
+        self.status_code = status_code
+        self.body = body
+        super().__init__(f"HTTP {status_code}")
+
+
+class _TimeoutError(Exception):
+    pass
+
+
+# ── SearXNG API ─────────────────────────────────────────────────────────
+
+SEARCH_HEADERS = {"User-Agent": "Hermes-SearXNG-Bridge/2.0"}
+EXTRACT_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
+    ),
+    "Accept": "text/html,application/xhtml+xml,*/*",
+    "Accept-Language": "en-US,en;q=0.9",
+}
+
+
+def search_searxng(query, pageno=1, language="all",
+                   categories="", time_range=""):
+    """Query the local SearXNG instance and return raw JSON results."""
+    params = {"q": query, "format": "json", "pageno": pageno, "language": language}
+    if categories:
+        params["categories"] = categories
+    if time_range:
+        params["time_range"] = time_range
+
+    url = f"{SEARXNG_URL}/search"
+    for attempt in range(3):
+        try:
+            resp = _http_get(url, params=params, timeout=REQUEST_TIMEOUT,
+                             headers=SEARCH_HEADERS)
+            return resp.json()
+        except (_TimeoutError, URLError, OSError):
+            if attempt < 2:
+                time.sleep(0.5)
+                continue
+            return {"error": "SearXNG timed out after 3 attempts"}
+        except _HTTPError as e:
+            return {"error": f"SearXNG returned HTTP {e.status_code}"}
+        except Exception as e:
+            if attempt < 2:
+                time.sleep(0.5)
+                continue
+            return {"error": f"Search failed: {e}"}
+    return {"error": "Unknown search error"}
+
+
+def format_results(data, query, pageno):
+    """Format SearXNG JSON results into agent-friendly markdown."""
+    if "error" in data:
+        return f"**Search error:** {data['error']}"
+
+    results = data.get("results", [])
+    total = data.get("number_of_results") or len(results)
+    engines = data.get("engines", [])
+    suggestions = data.get("suggestions", [])
+    answers = data.get("answers", [])
+
+    lines = [f"**Search:** `{query}`  |  page {pageno}  |  {total} results"]
+    if engines:
+        lines.append(f"*Engines:* {', '.join(engines[:8])}")
+
+    for ans in answers:
+        lines.append(f"\n> **{ans.get('answer', '')}**")
+        if ans.get("url"):
+            lines.append(f"> [{ans['url']}]({ans['url']})")
+
+    if suggestions:
+        lines.append(f"\n*Suggestions:* {', '.join(suggestions[:5])}")
+
+    if not results:
+        return "\n".join(lines) + "\n\n*No results found.*"
+
+    lines.append("")
+    for i, r in enumerate(results[:MAX_RESULTS], 1):
+        title = r.get("title", "Untitled")
+        url = r.get("url", "")
+        snippet = (r.get("content", "") or "")[:300].strip()
+        engine = r.get("engine", "?")
+        score = r.get("score", 0)
+        pub = r.get("publishedDate", "")
+        cat = r.get("category", "")
+
+        lines.append(f"{i}. **[{title}]({url})**" if url else f"{i}. **{title}**")
+        if snippet:
+            lines.append(f"   {snippet}")
+
+        meta = [f"Engine: {engine}"]
+        if score:
+            meta.append(f"Score: {score:.2f}")
+        if pub:
+            meta.append(f"Date: {pub}")
+        if cat and cat != "general":
+            meta.append(f"Cat: {cat}")
+        lines.append(f"   *{' | '.join(meta)}*")
+        lines.append("")
+
+    if len(results) > MAX_RESULTS:
+        lines.append(
+            f"*Showing {MAX_RESULTS} of {len(results)} on this page "
+            f"({total} total)*"
+        )
+    return "\n".join(lines)
+
+
+# ── Web Extract ─────────────────────────────────────────────────────────
+
+def extract_url(url, char_limit=EXTRACT_CHAR_LIMIT):
+    """Fetch a URL and return its text content."""
+    if not url.startswith(("http://", "https://")):
+        return f"Invalid URL: {url}"
+
+    try:
+        resp = _http_get(url, timeout=EXTRACT_TIMEOUT, headers=EXTRACT_HEADERS)
+    except _TimeoutError:
+        return f"**Timeout:** {url} took longer than {EXTRACT_TIMEOUT}s"
+    except _HTTPError as e:
+        return f"**HTTP {e.status_code}:** {url}"
+    except Exception as e:
+        return f"**Error fetching {url}:** {e}"
+
+    content_type = resp.headers.get("content-type", "")
+    if "text/html" in content_type:
+        text = strip_html(resp.text)
+    elif "text/" in content_type:
+        text = resp.text
+    else:
+        text = strip_html(resp.text)
+        if len(text) < 100:
+            return f"Unsupported content type: {content_type}"
+
+    if len(text) > char_limit:
+        head = text[: char_limit // 2]
+        tail = text[-char_limit // 4 :]
+        text = f"{head}\n\n[... truncated ({len(text)} total chars) ...]\n\n{tail}"
+
+    title_m = re.search(r"<title[^>]*>([^<]+)</title>", resp.text, re.IGNORECASE)
+    title = title_m.group(1).strip() if title_m else urlparse(url).netloc
+    host = urlparse(url).netloc
+
+    return f"**Source:** [{title}]({url})  |  {host}  |  {len(resp.text)} bytes\n\n{text}"
+
+
+# ── MCP JSON-RPC Handlers ───────────────────────────────────────────────
+
+TOOLS = [
+    {
+        "name": "searxng_web_search",
+        "description": (
+            "Search the web using SearXNG (privacy-respecting metasearch engine). "
+            "Returns results from multiple search engines with titles, URLs, "
+            "descriptions, scores, and metadata. Supports pagination and language "
+            "filtering."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Search query string"},
+                "pageno": {
+                    "type": "integer", "description": "Page number (default: 1)",
+                    "default": 1,
+                },
+                "language": {
+                    "type": "string",
+                    "description": "Language code (e.g., 'en', 'zh', 'all')",
+                    "default": "all",
+                },
+                "categories": {
+                    "type": "string",
+                    "description": (
+                        "Comma-separated categories: general, news, images, videos, "
+                        "science, files, it, social media, music, map (default: all)"
+                    ),
+                },
+                "time_range": {
+                    "type": "string",
+                    "description": (
+                        "Time range: day, week, month, year, or empty for any time"
+                    ),
+                },
+            },
+            "required": ["query"],
+        },
+    },
+    {
+        "name": "searxng_web_extract",
+        "description": (
+            "Fetch and extract readable text content from a web URL. "
+            "Strips HTML, scripts, and styles. Returns clean text suitable for "
+            f"reading. Content truncated at ~{EXTRACT_CHAR_LIMIT} chars."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "url": {
+                    "type": "string",
+                    "description": "Full URL to fetch and extract content from",
+                },
+                "char_limit": {
+                    "type": "integer",
+                    "description": f"Max chars to return (default: {EXTRACT_CHAR_LIMIT})",
+                    "default": EXTRACT_CHAR_LIMIT,
+                },
+            },
+            "required": ["url"],
+        },
+    },
+]
+
+
+def make_response(req_id, result):
+    return json.dumps({"jsonrpc": "2.0", "id": req_id, "result": result})
+
+
+def make_error(req_id, code, message):
+    return json.dumps(
+        {"jsonrpc": "2.0", "id": req_id, "error": {"code": code, "message": message}}
+    )
+
+
+def text_content(text):
+    return {"content": [{"type": "text", "text": text}]}
+
+
+def handle_request(msg):
+    req_id = msg.get("id")
+    method = msg.get("method", "")
+    params = msg.get("params", {})
+
+    if method == "initialize":
+        return make_response(req_id, {
+            "protocolVersion": "2024-11-05",
+            "capabilities": {"tools": {}},
+            "serverInfo": {
+                "name": "searxng-python-bridge",
+                "version": "2.0.1",
+            },
+        })
+
+    elif method == "tools/list":
+        return make_response(req_id, {"tools": TOOLS})
+
+    elif method == "tools/call":
+        name = params.get("name", "")
+        args = params.get("arguments", {})
+
+        if name == "searxng_web_search":
+            query = args.get("query", "")
+            if not query:
+                return make_error(req_id, -32602, "Missing required parameter: query")
+            data = search_searxng(
+                query,
+                pageno=args.get("pageno", 1),
+                language=args.get("language", "all"),
+                categories=args.get("categories", ""),
+                time_range=args.get("time_range", ""),
+            )
+            return make_response(req_id, text_content(
+                format_results(data, query, args.get("pageno", 1))))
+
+        elif name == "searxng_web_extract":
+            url = args.get("url", "")
+            if not url:
+                return make_error(req_id, -32602, "Missing required parameter: url")
+            result = extract_url(url, char_limit=args.get("char_limit", EXTRACT_CHAR_LIMIT))
+            return make_response(req_id, text_content(result))
+
+        return make_error(req_id, -32601, f"Unknown tool: {name}")
+
+    elif method == "ping":
+        return make_response(req_id, {})
+
+    elif method in ("notifications/initialized",) or method.startswith("notifications/"):
+        return None
+
+    return make_error(req_id, -32601, f"Unknown method: {method}")
+
+
+# ── HTTP Transport (for llama.cpp WebUI, browser-based clients) ──────────
+
+class MCPHTTPHandler(BaseHTTPRequestHandler):
+    """Handle JSON-RPC requests over HTTP (StreamableHTTP transport)."""
+
+    def log_message(self, fmt, *args):
+        if os.environ.get("SEARXNG_MCP_DEBUG"):
+            print(f"[mcp-http] {args[0]}", file=sys.stderr)
+
+    def do_OPTIONS(self):
+        self.send_response(204)
+        self._cors()
+        self.end_headers()
+
+    def do_POST(self):
+        length = int(self.headers.get("Content-Length", 0))
+        body = self.rfile.read(length) if length else b""
+
+        try:
+            msg = json.loads(body)
+        except json.JSONDecodeError:
+            self.send_error(400, "Invalid JSON")
+            return
+
+        if isinstance(msg, list):
+            resp = json.dumps({
+                "jsonrpc": "2.0", "id": None,
+                "error": {"code": -32600, "message": "Batch requests not supported"}
+            })
+        else:
+            try:
+                resp = handle_request(msg)
+            except Exception as e:
+                resp = make_error(msg.get("id"), -32603, f"Internal error: {e}")
+
+        if resp is None:
+            self.send_response(202)
+            self._cors()
+            self.end_headers()
+            return
+
+        body_bytes = resp.encode("utf-8")
+        self.send_response(200)
+        self._cors()
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body_bytes)))
+        self.end_headers()
+        self.wfile.write(body_bytes)
+
+    def do_GET(self):
+        info = json.dumps({
+            "server": "searxng-python-bridge",
+            "version": "2.0.1",
+            "tools": [t["name"] for t in TOOLS],
+            "transport": "streamable-http",
+        }).encode("utf-8")
+        self.send_response(200)
+        self._cors()
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(info)))
+        self.end_headers()
+        self.wfile.write(info)
+
+    def do_DELETE(self):
+        self.send_response(200)
+        self._cors()
+        self.end_headers()
+
+    def _cors(self):
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers",
+                         "Content-Type, MCP-Protocol-Version, Mcp-Session-Id, Accept")
+        self.send_header("Access-Control-Max-Age", "86400")
+
+
+def run_http_server(host, port):
+    print(f"[searxng-mcp] HTTP server on http://{host}:{port}/mcp", file=sys.stderr)
+    print(f"[searxng-mcp] Tools: {[t['name'] for t in TOOLS]}", file=sys.stderr)
+    server = HTTPServer((host, port), MCPHTTPHandler)
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        print("\n[searxng-mcp] shutting down", file=sys.stderr)
+        server.shutdown()
+
+
+def run_stdio():
+    debug = os.environ.get("SEARXNG_MCP_DEBUG", "").lower() in ("1", "true", "yes")
+    buffer = ""
+    for line in sys.stdin:
+        if not line.strip():
+            continue
+        buffer += line
+        try:
+            msg = json.loads(buffer)
+            buffer = ""
+        except json.JSONDecodeError:
+            continue
+
+        if not isinstance(msg, dict):
+            if debug:
+                print(f"[searxng-mcp] ignoring non-dict: {type(msg)}", file=sys.stderr)
+            continue
+
+        try:
+            resp = handle_request(msg)
+        except Exception as e:
+            if debug:
+                import traceback
+                traceback.print_exc(file=sys.stderr)
+            resp = make_error(msg.get("id"), -32603, f"Internal error: {e}")
+
+        if resp is not None:
+            sys.stdout.write(resp + "\n")
+            sys.stdout.flush()
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="SearXNG MCP Bridge — search + extract via SearXNG"
+    )
+    parser.add_argument(
+        "--http-port", type=int, default=None,
+        help="Run as HTTP server on this port (for llama.cpp WebUI, browser clients)"
+    )
+    parser.add_argument(
+        "--http-host", type=str, default="127.0.0.1",
+        help="HTTP bind address (default: 127.0.0.1)"
+    )
+    args = parser.parse_args()
+
+    if args.http_port:
+        run_http_server(args.http_host, args.http_port)
+    else:
+        run_stdio()
+
+
+if __name__ == "__main__":
+    main()
