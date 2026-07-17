@@ -122,13 +122,22 @@
       "type": "remote",
       "url": "http://localhost:11235/mcp/ws",
       "enabled": true
+    },
+    "firecrawl": {
+      "type": "local",
+      "command": ["npx", "-y", "firecrawl-mcp"],
+      "enabled": true,
+      "environment": {
+        "FIRECRAWL_API_URL": "http://localhost:3002"
+      }
     }
   },
   "tools": {
     "searxng": true,
     "context7": true,
     "brave-search": true,
-    "youtube-transcript": true
+    "youtube-transcript": true,
+    "firecrawl": true
   },
   "agent": {
     "build": {
@@ -161,14 +170,16 @@
       "tools": {
         "searxng": true,
         "context7": true,
-        "youtube-transcript": true
+        "youtube-transcript": true,
+        "firecrawl": true
       },
       "mode": "primary",
       "options": {},
       "permission": {
         "searxng": "allow",
         "context7": "allow",
-        "youtube-transcript": "allow"
+        "youtube-transcript": "allow",
+        "firecrawl": "allow"
       }
     },
     "research": {
@@ -183,7 +194,8 @@
         "crawl": true,
         "c4ai": true,
         "playwright": true,
-        "github": true
+        "github": true,
+        "firecrawl": true
       },
       "mode": "all",
       "options": {},
@@ -195,7 +207,8 @@
         "crawl": "allow",
         "c4ai": "allow",
         "playwright": "allow",
-        "github": "allow"
+        "github": "allow",
+        "firecrawl": "allow"
       }
     },
     "simple": {
@@ -233,7 +246,8 @@
         "crawl": true,
         "c4ai": true,
         "playwright": true,
-        "github": true
+        "github": true,
+        "firecrawl": true
       },
       "mode": "all",
       "options": {},
@@ -245,7 +259,8 @@
         "crawl": "allow",
         "c4ai": "allow",
         "playwright": "allow",
-        "github": "allow"
+        "github": "allow",
+        "firecrawl": "allow"
       }
     },
     "self-review": {
