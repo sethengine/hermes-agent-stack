@@ -89,6 +89,14 @@ fps_limit=60    # Real cap
 # fps_limit=0  # UNLIMITED — no cap at all
 ```
 
+### ⚠️ Critical: `--use-angle=gl` causes "Network connection interrupted" on ALL pages
+
+Adding `--use-angle=gl` alongside `--use-gl=angle` (i.e. `--use-gl=angle --use-angle=gl`) causes ANGLE to use the OpenGL backend directly. On NVIDIA Wayland with Chrome 149+, this produces **"Network connection interrupted" errors on every page** — the GPU process crashes or stalls, which takes down Chrome's network service (they share GPU-accelerated networking paths like QUIC).
+
+**Fix:** Remove `--use-angle=gl`. Keep only `--use-gl=angle` — let ANGLE auto-detect its backend. On NVIDIA Wayland, ANGLE's default GL backend (not explicitly `--use-angle=gl`) is the only working path.
+
+**Tradeoff:** Removing `--use-angle=gl` can introduce **YouTube A/V desync** when hardware video decode (VA-API) is active — see the VA-API ZeroCopyGL pitfall below.
+
 ### ⚠️ Critical: `--use-gl=egl` crashes GPU process on NVIDIA + Wayland
 
 `--use-gl=egl` causes Chrome's GPU process to fail to boot. The GPU process crashes during EGL display initialization, and Chrome disables ALL hardware acceleration:
@@ -131,28 +139,7 @@ Net result: VAAPI is **disabled** — Video Acceleration Information is EMPTY in
 Location: `~/.config/chrome-flags.conf` (Arch wrapper reads this automatically)
 
 **Working config for NVIDIA + Wayland (Video + GPU acceleration):**
-```
---ozone-platform=wayland
---use-gl=angle
---ignore-gpu-blocklist
---enable-gpu-rasterization
---enable-native-gpu-memory-buffers
---enable-features=VaapiOnNvidiaGPUs,VaapiIgnoreDriverChecks,AcceleratedVideoDecodeLinuxGL,AcceleratedVideoDecodeLinuxZeroCopyGL,UseMultiPlaneFormatForHardwareVideo
-```
-
-Flag breakdown:
-
-| Flag | Purpose |
-|------|---------|
-| `--use-gl=angle` | REQUIRED — only working GL path on NVIDIA+Wayland |
-| `--ignore-gpu-blocklist` | Enables GPU despite Chrome's blocklist |
-| `--enable-gpu-rasterization` | GPU raster for page rendering |
-| `--enable-native-gpu-memory-buffers` | Needed for zero-copy video decode |
-| `VaapiOnNvidiaGPUs` | **Key flag** — enables VAAPI on NVIDIA GPUs on Chrome 149+ |
-| `VaapiIgnoreDriverChecks` | Bypasses Chrome's `Should skip nVidia device` check in vaapi_wrapper.cc |
-| `AcceleratedVideoDecodeLinuxGL` | VAAPI decode path via GL |
-| `AcceleratedVideoDecodeLinuxZeroCopyGL` | Reduces copies in decode pipeline |
-| `UseMultiPlaneFormatForHardwareVideo` | Keeps YUV as multi-plane textures (better quality) |
+```\n--ozone-platform=wayland\n--use-gl=angle\n--ignore-gpu-blocklist\n--enable-gpu-rasterization\n--enable-native-gpu-memory-buffers\n--enable-features=VaapiOnNvidiaGPUs,VaapiIgnoreDriverChecks,AcceleratedVideoDecodeLinuxGL,UseMultiPlaneFormatForHardwareVideo\n```\n\nFlag breakdown:\n\n| Flag | Purpose |\n|------|---------|\n| `--use-gl=angle` | REQUIRED — only working GL path on NVIDIA+Wayland |\n| `--ignore-gpu-blocklist` | Enables GPU despite Chrome's blocklist |\n| `--enable-gpu-rasterization` | GPU raster for page rendering |\n| `--enable-native-gpu-memory-buffers` | Needed for zero-copy video decode |\n| `VaapiOnNvidiaGPUs` | **Key flag** — enables VAAPI on NVIDIA GPUs on Chrome 149+ |\n| `VaapiIgnoreDriverChecks` | Bypasses Chrome's `Should skip nVidia device` check in vaapi_wrapper.cc |\n| `AcceleratedVideoDecodeLinuxGL` | VAAPI decode path via GL |\n| `UseMultiPlaneFormatForHardwareVideo` | Keeps YUV as multi-plane textures (better quality) |\n\n**Note on `AcceleratedVideoDecodeLinuxZeroCopyGL`:** This flag is deliberately NOT in the recommended config. On NVIDIA Wayland, zero-copy VA-API decode causes YouTube A/V desync (see the dedicated pitfall section below). Only add it if you need the performance gain and can tolerate the sync issue.
 
 ### Enabling VAAPI video decode on NVIDIA
 
@@ -161,6 +148,24 @@ Even with correct flags, Chrome has a **built-in check** that skips NVIDIA DRM d
 Should skip nVidia device named: nvidia-drm
 ```
 This requires BOTH `VaapiOnNvidiaGPUs` AND `VaapiIgnoreDriverChecks` in `--enable-features`. Without both, Video Acceleration Information in chrome://gpu stays empty.
+
+### ⚠️ Pitfall: `AcceleratedVideoDecodeLinuxZeroCopyGL` causes YouTube A/V desync on NVIDIA Wayland
+
+The zero-copy VA-API decode path (`AcceleratedVideoDecodeLinuxZeroCopyGL`) passes decoder output directly to the GL renderer without copying. On NVIDIA's proprietary driver, the frame pacing from this path is unreliable — frames arrive at irregular intervals, causing the video clock to drift from the audio clock.
+
+**Symptom:** YouTube audio/video gradually drifts out of sync (audio ahead of video) when hardware decode is active. Only affects videos using GPU decoding (check `chrome://media-internals`).
+
+**The tradeoff is unavoidable on NVIDIA Wayland:**
+- `--use-angle=gl` removed → fixes "network connection interrupted" but VA-API with ZeroCopyGL desyncs YouTube
+- `AcceleratedVideoDecodeLinuxZeroCopyGL` removed → fixes YouTube sync but VA-API decode uses the copy path (slightly higher CPU, may cause stutter on 4K)
+
+**Possible fixes (in order of likelihood):**
+
+1. Remove `AcceleratedVideoDecodeLinuxZeroCopyGL` from `--enable-features`, keep the rest. Hardware decode still works via the copy path — frame pacing is correct.
+2. If still desynced, try `--use-angle=vulkan` with `--use-gl=angle` — on some NVIDIA driver versions, Vulkan's swapchain handles zero-copy DMA-BUF frames better than GL. On others, Vulkan + Wayland crashes the GPU process — test.
+3. Switch to ANGLE's Vulkan backend: `--use-angle=vulkan` — only works on certain Chrome + driver combinations (see Critical section above).
+
+The root cause is NVIDIA's VA-API driver (`libva-nvidia-driver`) not properly implementing DMA-BUF modifier negotiation for zero-copy — the frames arrive but with incorrect presentation timestamps.
 
 ### Required environment variables
 
@@ -220,13 +225,29 @@ This applies to all Chromium-based browsers on Linux (Chrome, Edge, Brave, Vival
 
 ### The Fix
 
-Add `--enable-blink-features=MiddleClickAutoscroll` to `~/.config/chrome-flags.conf`:
+Add `--enable-features=MiddleClickAutoscroll` to `~/.config/chrome-flags.conf`:
 
 ```bash
-echo '--enable-blink-features=MiddleClickAutoscroll' >> ~/.config/chrome-flags.conf
+echo '--enable-features=MiddleClickAutoscroll' >> ~/.config/chrome-flags.conf
 ```
 
-### How Chrome Reads Flags on Arch/Manjaro
+**⚠️ CRITICAL: Use `--enable-features`, NOT `--enable-blink-features`.** Both flags enable the same autoscroll feature, but `--enable-blink-features=MiddleClickAutoscroll` causes Chrome to display a "stability and security will suffer" warning banner at the top of every page. The `--enable-features` form enables the same Blink runtime feature without triggering the unsupported-flag warning. Per the [ArchWiki](https://wiki.archlinux.org/title/Chromium#Enabling_autoscroll_with_middle_mouse_button): "While setting `--enable-blink-features` works in the same way as only typing `--enable-features`, the browser instead may display a warning."
+
+## ⚠️ Pitfall: `AcceleratedVideoDecodeLinuxZeroCopyGL` causes YouTube A/V desync on NVIDIA Wayland
+
+The zero-copy VA-API decode path (`AcceleratedVideoDecodeLinuxZeroCopyGL`) passes decoder output directly to the GL renderer without copying. On NVIDIA's proprietary driver, the frame pacing from this path is unreliable — frames arrive at irregular intervals, causing the video clock to drift from the audio clock.
+
+**Symptom:** YouTube audio/video gradually drifts out of sync (audio ahead of video) when hardware decode is active. Only affects videos using GPU decoding (check `chrome://media-internals`).
+
+**Root cause:** NVIDIA's VA-API driver (`libva-nvidia-driver`) does not properly implement DMA-BUF modifier negotiation for zero-copy. The frames arrive with incorrect presentation timestamps, and ANGLE's GL backend cannot compensate for the timing drift.
+
+**Fix:** Remove `AcceleratedVideoDecodeLinuxZeroCopyGL` from the `--enable-features` list. Hardware decode still works via the copy path — the non-zero-copy path (`AcceleratedVideoDecodeLinuxGL`) does proper frame pacing.
+
+**This is a permanent tradeoff on NVIDIA Wayland:** zero-copy gives better performance with broken sync; the copy path gives correct sync with slightly higher CPU usage (negligible on modern hardware like the RTX 5060 Ti).
+
+## Chrome Launch Chain (Arch/Manjaro)
+
+```
 
 The launch chain:
 
@@ -707,6 +728,59 @@ Then log out and back in for the group change to take effect.
 
 **Important**: This does NOT fix DPMS wake black screens. DDC/CI is used for brightness and display detection, not for display power state control. DPMS is handled through KWin → DRM → NVIDIA driver. The i2c fix only addresses brightness control and DisplayPort hotplug detection.
 
+## Invisible Mouse Cursor
+
+### Symptom
+
+Cursor works (clicks register) but the pointer sprite is invisible. The loading/busy cursor appears briefly when launching apps, but the normal `left_ptr` never renders.
+
+### Quick Fix
+
+```bash
+export KWIN_FORCE_SW_CURSOR=1
+systemctl --user import-environment KWIN_FORCE_SW_CURSOR
+systemctl --user restart plasma-kwin_wayland.service   # ⚠️ restarts compositor — screen will flicker
+```
+
+### Persistent Fix (survives logout)
+
+Three layers for reliability:
+
+```bash
+# Layer A — systemd user env
+systemctl --user set-environment KWIN_FORCE_SW_CURSOR=1
+
+# Layer B — environment.d
+mkdir -p ~/.config/environment.d
+echo 'KWIN_FORCE_SW_CURSOR=1' > ~/.config/environment.d/kwin_sw_cursor.conf
+
+# Layer C — plasma-workspace env sourcing
+mkdir -p ~/.config/plasma-workspace/env
+cat > ~/.config/plasma-workspace/env/cursor_fix.sh << 'EOF'
+#!/usr/bin/env bash
+export KWIN_FORCE_SW_CURSOR=1
+EOF
+chmod +x ~/.config/plasma-workspace/env/cursor_fix.sh
+
+# Also switch to a known-good cursor theme with proper Wayland assets:
+plasma-apply-cursortheme Breeze_Light
+```
+
+### ⚠️ Pitfall: Restarting KWin on Wayland
+
+**Do NOT restart KWin without warning the user first.** On Wayland, KWin **is the display server**. `systemctl restart plasma-kwin_wayland.service`:
+
+1. KWin stops → compositor dies → screen goes black
+2. SDDM (UID 959) grabs the GPU
+3. The user session never respawns → **screen stays black permanently**
+4. This is expected Wayland behavior, not a crash — but it looks identical to one
+
+**Always ask the user before restarting KWin or any system-disrupting service.**
+
+### Reference
+
+Full diagnosis and additional approaches in `references/invisible-cursor-nvidia-wayland.md`.
+
 ## Environment Variables for NVIDIA + Wayland
 
 ### Setting on Manjaro/Arch
@@ -1057,6 +1131,7 @@ This user communicates in extreme shorthand — fragment questions like "a sa", 
 - **Direct replacement over proxy** — when presented with a choice between a proxy/middleware approach (OptiScaler) and direct file replacement (swap nvngx_dlss.dll), they explicitly chose the simpler path. Lead with direct replacement first; only suggest OptiScaler or other proxy layers if direct replacement doesn't work.
 - **Automated, not manual** — if a fix needs repeating (DLSS updates), write a script and set up cron/launch hooks. They will not revisit a manual process.
 - **No clarifying questions** — list all options in one message. Let them choose. Do NOT ask "which approach do you prefer" — list them and wait.
+- **ASK before disruptive actions** — never restart KWin, the display manager, or any compositor/service without explicit user permission. Restarting the compositor on Wayland kills the session. Ask first.
 
 ### The Problem
 
@@ -1512,7 +1587,9 @@ DXVK (DX9-11) and VKD3D-Proton (DX12) use different HDR env vars. Check which re
 | `references/nvidia-open-vs-dkms-blackwell.md` | Reference | nvidia-open vs nvidia-dkms for Blackwell RTX 50-series — module requirements, GSP implications, and known issues |
 | `references/nvidia-open-vs-dkms-blackwell.md` | Reference | nvidia-open vs nvidia-dkms for Blackwell RTX 50-series — module requirements, GSP implications, and known issues |
 | `references/nvidia-suspend-resume-execcondition.md` | Reference | NVIDIA 595+ module license changed to "Dual MIT/GPL" — suspend/resume services skipped, black screen after wake, systemd drop-in override fix |
+| `references/invisible-cursor-nvidia-wayland.md` | Reference | Invisible cursor on NVIDIA Wayland — KWIN_FORCE_SW_CURSOR fix, cursor theme switching, xcb-cursor check, KWin restart pitfalls |
 | `references/proton-d2r-nvidia-wayland.md` | Reference | D2R-specific: ProtonDB findings, launch options, settings debugging, and frame limiter fixes for NVIDIA Wayland |
+| `references/chrome-archwiki-flags-research.md` | Reference | Chrome flag configuration from ArchWiki — tested configs, pitfall matrix, and authoritative documentation for NVIDIA + Wayland |
 | `scripts/check-irq-pinning.sh` | Script | Quick diagnostic: verify IRQ distribution + C-state + governor status after applying pinning template. Exit codes: 0=healthy, 1=warnings, 2=errors. |
 | `scripts/d2r-dlss-update.py` | Script | Auto-update any game's DLSS DLLs to the latest version from the GE-Proton manifest. Usage: `python3 scripts/d2r-dlss-update.py /path/to/game` |
 | `templates/pin-irqs-arrowlake.sh` | Template | Fixed IRQ pinning script (GPU+USB → P-cores) |

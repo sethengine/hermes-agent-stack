@@ -22,6 +22,12 @@ Use this skill when the user asks about any of:
 - "Investigate my system for performance issues"
 - Terminal feels slow / zsh is laggy / shell sluggish / "commands take a long time to process"
 - Alacritty/kitty/foot slow to process input or show prompt
+- WiFi performance investigation or wireless network tuning
+- Intel BE200/BE202 WiFi card troubleshooting or optimization
+- iwlwifi/iwlmld module parameter tuning
+- Path MTU discovery on WiFi or capped links
+- Wireless latency spikes or throughput below expected
+- Network module parameters (iwlwifi, iwlmld, cfg80211) investigation
 
 ## Multi-Layer System Audit
 
@@ -206,6 +212,7 @@ See `references/irq-affinity-diagnosis.md` for the hex decoding table and standa
 - `references/irq-affinity-diagnosis.md` — Hex mask decoding table and standalone IRQ diagnosis commands
 - `references/zsh-startup-optimization.md` — Shell startup latency: dead plugin managers, dual theme, async fixes, compdump cleanup
 - `references/pin-irqs-dynamic.sh` — Installable script for dynamic IRQ pinning
+- `references/wifi-intel-be200-be20x-investigation.md` — Intel BE200/BE202 WiFi 7 investigation: iwlmld power_scheme CAM, disable_11be, bt_coex, MTU probe methodology, TCP tuning, known ASPM instability background
 
 ### C-state locking for IRQ cores
 GPU/USB IRQ cores can enter deep C3 sleep (1048μs wake latency) between interrupts. Lock them to C1 only by disabling C2+.
@@ -368,6 +375,77 @@ sudo grub-mkconfig -o /boot/grub/grub.cfg
 # systemd-boot
 sudo sed -i 's/ intel_iommu=on,igfx_off//g; s/intel_iommu=on,igfx_off//g' /boot/loader/entries/*.conf
 ```
+
+### Chrome flags that break on NVIDIA Wayland
+
+These flags are known to cause WebGL fallback to SwiftShader (software), slow rendering, GPU context failures, and crashes on NVIDIA Wayland:
+
+| Flag | Effect | Fix |
+|------|--------|-----|
+| `--use-gl=angle` without `--use-angle=` | ANGLE defaults to SwiftShader on NVIDIA Wayland | Add `--use-angle=vulkan` or use `--use-gl=desktop` |
+| `--enable-native-gpu-memory-buffers` | Causes rendering corruption and GPU process crashes | Remove entirely |
+| `--enable-features=AcceleratedVideoDecodeLinuxGL` | Outdated flag name, may conflict with NVENC | Use `VaapiVideoDecoder` instead |
+| No `--disable-gpu-driver-bug-workarounds` | Chrome applies NVIDIA workarounds that slow down GPU | Add this flag alongside `--ignore-gpu-blocklist` |
+
+**Verified working configuration for Chrome 149+ on NVIDIA 595 + KDE Wayland:**
+```ini
+--ozone-platform=wayland
+--use-gl=angle
+--use-angle=vulkan
+--ignore-gpu-blocklist
+--disable-gpu-driver-bug-workarounds
+--enable-gpu-rasterization
+--enable-features=VaapiVideoDecoder,VaapiIgnoreDriverChecks
+--num-raster-threads=10
+```
+
+### NVIDIA GSP Firmware — DPMS Wake Black Screen on RTX 50 Series
+
+GSP firmware on GB206 (RTX 5060 Ti) and other Blackwell GPUs fails DisplayPort link training during DPMS wake. The monitor's LED shows signal (white) but the screen stays black. This is a known bug across 595.xx drivers.
+
+**Fix:** Disable GSP firmware + preserve video memory:
+```ini
+options nvidia NVreg_EnableGpuFirmware=0 NVreg_PreserveVideoMemoryAllocations=1
+```
+Requires `sudo mkinitcpio -P && reboot`.
+
+**Alternative (if GSP must stay on):** Force software link training:
+```ini
+options nvidia NVreg_RegistryDwords="RMUseSwLinkTraining=1"
+```
+
+**Mitigation via DDC/CI:** Add user to `i2c` group (`sudo gpasswd -a $USER i2c`) so PowerDevil can control monitor via DDC/CI, bypassing DRM DPMS.
+
+### Orphan Diagnostic Subprocesses
+
+Check for stuck diagnostic processes consuming 100% CPU:
+```bash
+ps -eo pid,pcpu,comm,args --sort=-pcpu | head -10
+```
+Services like RabbitMQ can spawn `rabbitmq-diagno` subprocesses that lock up in infinite loops. Kill with `sudo kill -9 <PID>`.
+
+### Watchdog on nohz_full cores defeats isolation
+
+`kernel.watchdog=1` with `watchdog_cpumask=0-19` creates periodic timer interrupts on ALL cores, including nohz_full isolated cores. Fix:
+```
+nohz_full=0-7 watchdog_cpumask=8-19
+```
+
+### Timer migration on nohz_full systems
+
+`kernel.timer_migration=1` lets timers bounce between cores, defeating nohz_full isolation:
+```bash
+echo "kernel.timer_migration=0" | sudo tee /etc/sysctl.d/99-latency.conf
+sysctl -p /etc/sysctl.d/99-latency.conf
+```
+
+### WiFi IRQs may escape background pinning
+
+iwlwifi MSI-X vectors may ignore `smp_affinity` writes and land on P-cores. Check:
+```bash
+cat /proc/interrupts | grep iwlwifi | awk '{for(i=2;i<=21;i++) if($i>0 && $i>10000) printf "%s → CPU%d (%d)\n", $1, i-2, $i}'
+```
+Extend straggler catch to include iwlwifi (same bitmask logic as NVMe straggler).
 
 ### Pitfalls
 - `KWIN_TRIPLE_BUFFER=0` is a KDE5 var — does nothing on KDE6. The KDE6 equivalent is `KWIN_DRM_DISABLE_TRIPLE_BUFFERING=1`
@@ -654,7 +732,7 @@ sudo evtest --grab /dev/input/by-id/usb-...-event-mouse
 # Look for sub-2ms deltas between consecutive POINTER_MOTION events during fast sweep
 ```
 
-## Output Style Preference
+### Output Style Preference
 
 The user for this system prefers **commands-first, terse output**. Present the exact command(s) before any explanation. The user will ask if they need clarification. When sharing tuning recommendations:
 
@@ -662,6 +740,8 @@ The user for this system prefers **commands-first, terse output**. Present the e
 2. Show the actual output next
 3. Only explain if the result is unexpected
 4. Avoid multi-paragraph analysis — let the numbers speak
+5. **When showing pending config changes**: present as raw file content blocks, one per file, with zero commentary between them. The user will ask if they need context. Label each block with the target path.
+6. **After applying writes**: verify the write actually happened (check exit code, file content, or runtime state) before reporting success. Do not rely on tool return values alone — the system verifier catches silent failures.
 
 This applies to ALL tuning/debugging output for this user. "Show me the command and its result, then I'll ask for more" is the expected interaction pattern.
 
@@ -780,16 +860,140 @@ See `references/usb-hid-polling-1000hz.md` for session-specific reproduction com
 
 ## Network Latency Tuning
 
-### WiFi-specific
-- **Modprobe** `iwlwifi power_save=0 uapsd_disable=1` sets driver-level power saving
-- **Runtime** `iw dev wlpXXX set power_save off` is a SEPARATE control from modprobe
-- Both must be set for lowest WiFi latency
-- Default qdisc is `noqueue` — `fq_codel` adds bufferbloat protection
+### WiFi Hardware Investigation — Full Methodology
 
-### TCP tuning for gaming
+When investigating a WiFi adapter's performance, probe these layers in order:
+
+#### Layer 1 — Hardware & Driver Identification
+```bash
+# Card, vendor, PCI location
+lspci -vnn | grep -i network
+# Driver and firmware in use
+ethtool -i wlpX
+# Module parameters (iwlwifi + iwlmld — separate drivers on new Intel cards)
+cat /sys/module/iwlwifi/parameters/*
+cat /sys/module/iwlmld/parameters/*
+# Firmware files loaded
+dmesg | grep -i 'iwlwifi\|iwlmld'
+```
+
+#### Layer 2 — Link Quality & Connection Cap
+```bash
+# SSID, freq, channel width, signal, bitrate, MCS/NSS
+iw dev wlpX link
+iw dev wlpX station dump
+iw dev wlpX info
+# Survey dump for noise floor on active channel
+iw dev wlpX survey dump
+# Regulatory domain
+iw reg get
+iw list | grep -E 'Band|frequencies|MHz|widths|160|6 GHz|320'
+```
+
+Key signals:
+- **Signal < −70 dBm**: marginal link, reposition or check antennas
+- **Channel width < AP capability**: check for DFS interference or regulatory limits
+- **Rate < expected**: AP may be limiting (check if VHT, HE, or EHT is negotiated)
+- **TX retries > 0.1%**: interference or power save transitions
+
+#### Layer 3 — iwlwifi/iwlmld Module Parameter Tuning
+
+For Intel BE200/BE202 (Bz family) and similar iwlwifi cards:
+
+| Param | Module | Default | Performance | Why |
+|-------|--------|---------|-------------|-----|
+| `power_save` | iwlwifi | N | N | mac80211 PS off |
+| `bt_coex_active` | iwlwifi | Y | **0** | When BT is soft-blocked, coexistence still reserves airtime — wastes throughput |
+| `disable_11be` | iwlwifi | N | **1** | Avoids unstable WiFi 7 codepaths on Bz hardware (known bug: Queue stuck / NMI_INTERRUPT_UNKNOWN) |
+| `uapsd_disable` | iwlwifi | 3 | **3** | Bitmask: 1=BSS, 2=P2P Client; 3 disables both |
+| `power_scheme` | **iwlmld** | 2 (BIST) | **1 (CAM)** | **Most impactful.** Controls device-level PCIe power gating independently of mac80211 PS. CAM keeps the PCIe link active — eliminates L1 substate transition latency |
+
+Create `/etc/modprobe.d/iwlwifi.conf`:
+```
+options iwlwifi power_save=0 bt_coex_active=0 disable_11be=1 uapsd_disable=3
+options iwlmld power_scheme=1
+```
+
+Then rebuild initramfs: `sudo mkinitcpio -P` (Manjaro/Arch), `sudo update-initramfs -u` (Debian/Ubuntu), `sudo dracut -f` (Fedora). Requires reboot.
+
+**Pitfall**: `pcie_aspm=off` kernel cmdline is **NOT sufficient** on modern platforms — ACPI _OSC can override it. On BE200/BE202, PCI-level ASPM disable via `setpci` for both endpoint and upstream bridge is the reliable fix when module params alone don't stabilize the link. See `references/wifi-intel-be200-be20x-investigation.md`.
+
+#### Layer 4 — IRQ Distribution & CPU Affinity
+
+Check if all WiFi MSI-X vectors are landing on one CPU:
+```bash
+# View iwlwifi interrupt counts per CPU
+cat /proc/interrupts | grep iwlwifi
+# Pin to specific core bank (e.g., E-cores 12-19 on a hybrid system)
+echo 12 > /proc/irq/210/smp_affinity_list
+```
+
+See the IRQ Affinity section above for the full pinning script.
+
+#### Layer 5 — Path MTU Discovery
+
+WiFi often has a lower-than-1500 MTU due to router WAN caps or ISP overhead. The current interface MTU may be suboptimal:
+
+```bash
+# 1. Check current interface MTU
+ip link show wlpX | grep mtu
+
+# 2. Probe path MTU to WAN
+ping -M do -c 3 -s 1444 8.8.8.8   # payload = MTU - 28 (IP+ICMP); 1472 = full 1500
+ping -M do -c 3 -s 1392 8.8.8.8   # 1420 MTU test (common WiFi default)
+
+# 3. If Frag needed is returned, router tells you the limit:
+# "From 192.168.0.1 icmp_seq=1 Frag needed and DF set (mtu = 1472)"
+
+# 4. Test local gateway at full 1500
+ping -M do -c 3 -s 1472 192.168.0.1
+
+# 5. Apply optimal MTU
+sudo ip link set dev wlpX mtu <discovered_value>
+```
+
+Each +52 bytes saved = ~3.5% throughput gain on bulk TCP flows.
+
+### WiFi-specific Rules Summary
+- **Modprobe** params (iwlwifi + iwlmld) control driver-level power — these are SEPARATE from runtime `iw dev power_save`
+- **Runtime** `iw dev wlpXXX set power_save off` is mac80211 PS — still check both
+- **iwlmld power_scheme=1 (CAM)** is the real fix for L1 latency on BE20x cards
+- `bt_coex_active=0` when Bluetooth is unused/blocked
+- `disable_11be=1` is a stability workaround for WiFi 7 hardware on current firmware
+- Default qdisc is `noqueue` — `fq_codel` adds bufferbloat protection
+- Path MTU can be 52-80 bytes below 1500 due to WiFi overhead + router caps — probe it
+
+### Reference
+See `references/wifi-intel-be200-be20x-investigation.md` for the full session-specific research: firmware versions, iwlmld power_scheme CAM source analysis, BE200/BE202 instability background, discovered MTU values, and the complete commands reference.
+
+### TCP Tuning for Low Latency + Throughput
+
 ```ini
 net.ipv4.tcp_congestion_control=bbr
 net.core.default_qdisc=fq
-net.ipv4.tcp_notsent_lowat=131072     # Allows send without ACK wait
+net.ipv4.tcp_notsent_lowat=131072       # Allows send without ACK wait
 net.ipv4.tcp_fastopen=3
+net.ipv4.tcp_slow_start_after_idle=0    # Don't reset cwnd after idle pauses
+net.ipv4.tcp_mtu_probing=1              # Enable PMTU discovery
+net.core.rmem_default=262144            # BDP for 350Mbps × 5ms ≈ 219KB
+net.core.wmem_default=262144            # Same as rmem
 ```
+
+Apply via `/etc/sysctl.d/90-wifi-performance.conf` and `sudo sysctl -p /etc/sysctl.d/90-wifi-performance.conf`.
+
+### Write Verification
+
+After using `sudo tee` or any file-write command to install tuning configs, ALWAYS verify the write landed before informing the user:
+
+```bash
+# Verify file content matches what was intended
+cat /etc/modprobe.d/iwlwifi.conf
+cat /etc/sysctl.d/90-wifi-performance.conf
+
+# Verify runtime state reflects the change
+sysctl net.ipv4.tcp_mtu_probing
+iw dev wlpX get power_save
+cat /sys/module/iwlmld/parameters/power_scheme
+```
+
+Sudo may silently fail (no password provided, cached credentials expired). Do not assume write success from a zero exit code — check via a subsequent read. The File-mutation verifier in Hermes catches unverified writes; be explicit about confirmation."

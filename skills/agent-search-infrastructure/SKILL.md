@@ -114,6 +114,23 @@ print(f'Enabled: {len(enabled)} of {len(d[\"engines\"])}')
 "
 ```
 
+## SearXNG Quirks for Agent Research
+
+This system has SearXNG available via MCP tools (`mcp__searxng__web_search`, `mcp__searxng__web_extract`) AND Firecrawl MCP tools (`mcp__firecrawl__firecrawl_scrape`). The research workflow uses them as complementary layers:
+
+| Phase | Tool | When |
+|-------|------|------|
+| **Discovery** | `mcp__searxng__web_search` | Free, multi-engine. First pass for finding leads. Pass `context="tech"`/`"news"`/`"scholar"` for category boosting. |
+| **Quick extract** | `mcp__searxng__web_extract` | Fast (~15000 chars via Trafilatura), cached 5min. Use for overview pages. |
+| **Deep extract** | `mcp__firecrawl__firecrawl_scrape` | Full markdown, proxy support, no char limit. Use for Reddit threads, full articles, JS-rendered content. |
+| **Structured extract** | `mcp__firecrawl__firecrawl_scrape` with `formats:["json"]` | LLM extraction into schema from known pages. |
+
+**SearXNG quirks relevant during research:**
+- **Name collisions**: Short/generic terms (e.g., "Hermes Agent") collide with unrelated content (HERMES particle physics experiment). Mitigation: add qualifying terms to the query.
+- **No site: operator**: SearXNG doesn't proxy `site:github.com` cleanly. Use domain keywords instead.
+- **Trafilatura limits**: Strips nav/sidebars, ~15000 char cap. Use Firecrawl for full-page content.
+- **Engine silence**: Some queries return only Wikipedia/arXiv results. Add more specific queries to broaden coverage.
+
 ## Fallback Chain
 
 Always implement a fallback chain — never trust a single backend:
@@ -128,7 +145,212 @@ SearXNG (primary) → DuckDuckGo (fallback) → Wikipedia (supplement) → arXiv
 
 **arXiv supplement**: auto-activate for technical queries (keywords: paper, research, model, algorithm, neural, transformer, diffusion, training, benchmark, dataset, architecture, attention, embedding, fine-tun).
 
-## Caching
+## Structured Research Plans (`research_plan` tool)
+
+The `research_plan` tool breaks complex questions into sub-queries, searches each independently, deduplicates across all results, and synthesizes with confidence scores.
+
+### Sub-query derivation
+
+```python
+def _derive_subqueries(query, mode="primary"):
+    q = query.lower()
+    if any(w in q for w in ["vs", "versus", "compare"]):
+        # Comparison: one sub-query per entity + head-to-head
+        subs.append({"question": f"Reviews and recommendations for {query}", ...})
+        subs.append({"question": f"Latest news about {query}", "categories": "news"})
+    elif any(w in q for w in ["best", "top", "recommend", "review"]):
+        # Recommendations: reviews + news + technical specs
+        subs.append({"question": f"Reviews and recommendations for {query}", ...})
+        subs.append({"question": f"Latest news about {query}", "categories": "news"})
+        subs.append({"question": f"Technical details for {query}", "context": "tech"})
+    elif any(w in q for w in ["how to", "tutorial", "guide", "setup"]):
+        # Tutorials: guides + common issues
+        subs.append({"question": f"Tutorials and guides for {query}", ...})
+        subs.append({"question": f"Common issues for {query}", "context": "tech"})
+    else:
+        # General: overview + news + deep dive
+        subs.append({"question": f"What is {query}?", ...})
+        subs.append({"question": f"Latest developments in {query}", "categories": "news"})
+        subs.append({"question": f"Deep dive into {query}", "context": "tech"})
+```
+
+### Confidence scoring
+
+Each result gets a `confidence: N%` derived from:
+- **Base score** from the search engine (higher rank = higher base)
+- **Category boost** (+0.05 to +0.25) from engine-specific boosts
+- **Source diversity** — results from 3+ engines rank higher in synthesis
+
+### Depth modes
+
+| Mode | Sub-queries | Use case |
+|------|-------------|----------|
+| `quick` | 2 | Straightforward questions, quick overview |
+| `standard` | 3-4 | General research (default) |
+| `deep` | 5-6 | Complex topics, comprehensive synthesis |
+
+### Output structure
+
+```
+# Research Plan: {topic}
+## 1. {sub-question}
+*Query: `...` | Sources: engine1, engine2*
+1. **[Title](url)** *(confidence: 85%)*
+   snippet...
+
+## Key Findings (cross-source synthesis)
+1. **[Title](url)** — most confident across all sources
+```
+
+## Self-Hosted Firecrawl (parallel search + scrape backend)
+
+Self-hosted Firecrawl provides a local alternative to the paid cloud tier. Clone from `github.com/firecrawl/firecrawl`, configure `.env`, run with Docker Compose. 6 containers, ~3-5GB RAM.
+
+### Quick setup (pre-built images — skip BuildKit)
+
+The repo's docker-compose.yaml uses `build:` directives that need Docker BuildKit. If BuildKit is unavailable (Docker 29 on Manjaro ships without `docker-buildx`), switch to pre-built images:
+
+```bash
+git clone --depth=1 https://github.com/firecrawl/firecrawl.git ~/firecrawl
+cd ~/firecrawl
+```
+
+Edit `docker-compose.yaml` — replace three `build:` stanzas with `image:`:
+```yaml
+x-common-service: &common-service
+  image: ghcr.io/firecrawl/firecrawl
+  # build: apps/api          ← comment out
+
+playwright-service:
+  image: ghcr.io/firecrawl/playwright-service:latest
+  # build: apps/playwright-service-ts
+
+nuq-postgres:
+  image: ghcr.io/firecrawl/nuq-postgres:latest
+  # build: apps/nuq-postgres
+```
+
+### .env configuration (minimal working)
+
+```bash
+PORT=3002
+HOST=0.0.0.0
+USE_DB_AUTHENTICATION=false
+BULL_AUTH_KEY=firecrawl-admin-panel
+
+# PostgreSQL — MUST use 'postgres' DB name (pg_cron extension requirement)
+POSTGRES_USER=firecrawl
+POSTGRES_PASSWORD=firecrawl_pg_secret
+POSTGRES_DB=postgres      # NOT a custom name — pg_cron only works in 'postgres' DB
+
+# Resource tuning (adjust per hardware)
+NUM_WORKERS_PER_QUEUE=12
+CRAWL_CONCURRENT_REQUESTS=20
+MAX_CONCURRENT_JOBS=10
+BROWSER_POOL_SIZE=8
+MAX_CPU=0.85
+MAX_RAM=0.85
+
+# AI features — uncomment when local LLM running
+# OPENAI_BASE_URL=http://127.0.0.1:8084/v1
+# OPENAI_API_KEY=not-needed
+```
+
+### SearXNG integration
+
+Firecrawl's `/v1/search` needs a search backend. Default is Google; wire it to SearXNG instead:
+
+```bash
+# Firecrawl runs in Docker. To reach SearXNG on host or in another Docker container:
+SEARXNG_ENDPOINT=http://host.docker.internal:8081
+```
+
+The compose file already has `extra_hosts: ["host.docker.internal:host-gateway"]` — no extra config needed. Verify with: `docker compose logs api | grep "Using searxng search"`.
+
+### Hermes MCP integration
+
+Official npm package `firecrawl-mcp` (v3.22+) supports self-hosted via `FIRECRAWL_API_URL`:
+
+```yaml
+# ~/.hermes/config.yaml
+mcp_servers:
+  firecrawl:
+    command: npx
+    args: ["-y", "firecrawl-mcp"]
+    env:
+      FIRECRAWL_API_URL: http://localhost:3002
+      # No FIRECRAWL_API_KEY needed for self-hosted
+```
+
+Registers ~13 MCP tools: `firecrawl_scrape`, `firecrawl_search`, `firecrawl_crawl`, `firecrawl_map`, `firecrawl_interact`, `firecrawl_agent`, `firecrawl_extract`, `firecrawl_batch_scrape`, `firecrawl_monitor_*`, `firecrawl_research_*`.
+
+### Hermes built-in web tools config
+
+Hermes' built-in `web_search` and `web_extract` tools also need to know about the self-hosted Firecrawl instance. Add a `firecrawl:` sub-key under the `web:` section with the API URL:
+
+```yaml
+# ~/.hermes/config.yaml
+web:
+  backend: firecrawl
+  search_backend: firecrawl
+  extract_backend: firecrawl
+  use_gateway: false
+  firecrawl:
+    FIRECRAWL_API_URL: http://localhost:3002    # Required — without this, web tools fail with "Web tools are not configured"
+```
+
+Without this, the built-in tools return: `"Error searching web: Web tools are not configured. Set FIRECRAWL_API_KEY for cloud Firecrawl or set FIRECRAWL_API_URL for a self-hosted Firecrawl instance."`
+
+Both the `web:` section AND the `mcp_servers:` entry are needed for full Hermes integration (MCP tools for agent use, web tools for tool-use). Config changes require a Hermes restart to take effect — `/reload-mcp` only reloads MCP servers, not the `web:` section.
+
+Alternatively, set `FIRECRAWL_API_URL` under the top-level `env:` section in config.yaml — this exports it as a process-wide env var that the web tools also check.
+
+Pitfall: `env.FIRECRAWL_API_URL` must use `localhost` not `127.0.0.1` when Hermes connects through Docker networking or host-loopback that resolves localhost differently.
+
+### API endpoints (v1)
+
+```bash
+# Scrape
+curl -X POST http://localhost:3002/v1/scrape \
+  -H "Content-Type: application/json" \
+  -d '{"url":"https://example.com","formats":["markdown"]}'
+
+# Search (requires SearXNG or Google config)
+curl -X POST http://localhost:3002/v1/search \
+  -H "Content-Type: application/json" \
+  -d '{"query":"linux kernel","limit":3,"scrapeOptions":{"formats":["markdown"]}}'
+
+# Crawl
+curl -X POST http://localhost:3002/v1/crawl \
+  -H "Content-Type: application/json" \
+  -d '{"url":"https://example.com","limit":5}'
+
+# Map
+curl -X POST http://localhost:3002/v1/map \
+  -H "Content-Type: application/json" \
+  -d '{"url":"https://example.com"}'
+```
+
+All return `{"success": true, "data": {...}}` with markdown content.
+
+### Management script
+
+```bash
+# ~/.local/bin/firecrawl-ctl
+firecrawl-ctl status   # Container health + API check
+firecrawl-ctl up/down  # docker compose up/down
+firecrawl-ctl logs     # Tail API logs
+firecrawl-ctl pull     # Update pre-built images
+```
+
+### Firecrawl-specific pitfalls
+
+- **BuildKit required for source builds**: Docker 29 on Manjaro ships without `docker-buildx`. Install it (`sudo pacman -S docker-buildx`) or use pre-built `ghcr.io/firecrawl/*` images.
+- **POSTGRES_DB must be `postgres`**: The nuq-postgres init script calls `CREATE EXTENSION pg_cron` which only works in the `postgres` database. Setting `POSTGRES_DB=firecrawl` (or any non-postgres name) causes the container to crash with "can only create extension in database postgres".
+- **host.docker.internal for cross-container access**: When Firecrawl (in Docker) needs to reach SearXNG (on host or in another Docker container), use `host.docker.internal` — not `localhost` or `127.0.0.1`. The compose file already has `extra_hosts: ["host.docker.internal:host-gateway"]`.
+- **Supabase/auth warnings are normal**: Self-hosted instances log "bypassing authentication" and "Supabase client not configured" warnings. These are harmless — scraping/crawling works fine without Supabase.
+
+### Caching
 
 TTL-based LRU cache in the bridge process (no Redis/ValKey needed for single-process):
 
@@ -206,12 +428,16 @@ Apply boosts additively, cap at 1.0. Skip dict-type entries when iterating (cate
 
 ## Pitfalls
 
+- **SearXNG name collisions**: Short/generic search terms collide with unrelated content (e.g., "Hermes Agent" returns HERMES particle physics papers). Always add qualifying terms to disambiguate.
 - **3s timeout is the silent killer**: SearXNG default `request_timeout: 3.0` causes many engines to silently time out. Bump to 6.0s.
 - **HTTP bridge dies without supervision**: run `--http-port` under systemd or tmux. Don't rely on background shell processes.
 - **Docker volume permissions**: SearXNG config files are owned by `systemd-journal-remote:systemd-journal-remote`. Use sudo or docker exec to edit.
 - **llama.cpp proxy toggle**: the "Use llama-server proxy" toggle only appears when EDITING an existing MCP server — not when first adding one. Add the server, save it, then edit to find the toggle.
 - **python3 vs python3.14**: Trafilatura may only be installed for a specific Python version. Use explicit path in agent configs when extraction quality matters.
 - **Don't scope-creep MCP tools**: when building search bridges for agents, keep tools focused on search. Users explicitly reject kitchen-sink bundles (weather, calculator, currency). Each tool should do one thing well.
+- **OpenCode skill discovery ignores symlinks**: skills must be real directories (not symlinks) in `~/.config/opencode/skills/`. Copy with `cp -r`, not `ln -s`.
+- **Firecrawl Docker is resource-heavy**: 6 containers use ~3-5GB RAM total. Plan accordingly if memory is constrained. On machines with 32GB+, tune resource limits up in docker-compose.yaml (API to 8 CPUs/16GB, Playwright to 4 CPUs/8GB). Use pre-built `ghcr.io/firecrawl/*` images if BuildKit is unavailable (Docker 29 w/o docker-buildx package).
+- **ValKey binding**: default valkey installation binds to 127.0.0.1. Docker containers need the Docker bridge IP (typically 172.17.0.1) or 0.0.0.0 with firewall protection.
 
 ## Quick Deploy
 

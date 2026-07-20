@@ -1,16 +1,28 @@
 ---
 name: system-spec
-description: Full hardware + software specification for sethengine's workstation. Load when system details are relevant — debugging, gaming advice, performance tuning, driver questions, kernel config. Rewrite when specs change.
+description: >-
+  Full hardware + software specification for sethengine's workstation.
+  Load this skill whenever system details are relevant — debugging,
+  gaming advice, performance tuning, driver questions, kernel config.
+  Rewrite this skill's spec section when any component changes.
+tags:
+  - system-spec
+  - hardware
+  - software
+  - linux
+  - gaming
+  - nvidia
+  - manjaro
 ---
 
 # System Specification — sethengine-desktop
 
-> **Last verified:** 2026-07-12
+> **Last verified:** 2026-07-12  
 > **Rewrite trigger:** any HW/SW change (new GPU, RAM, storage, OS upgrade, kernel change, driver update, monitor change)
 
 ---
 
-## System Overview
+## 🖥 System Overview
 
 | Field | Value |
 |-------|-------|
@@ -23,7 +35,7 @@ description: Full hardware + software specification for sethengine's workstation
 
 ---
 
-## Motherboard / BIOS
+## 🧠 Motherboard / BIOS
 
 | Field | Value |
 |-------|-------|
@@ -34,7 +46,7 @@ description: Full hardware + software specification for sethengine's workstation
 
 ---
 
-## CPU
+## ⚡ CPU
 
 | Field | Value |
 |-------|-------|
@@ -48,10 +60,11 @@ description: Full hardware + software specification for sethengine's workstation
 | Socket(s) | 1 |
 | NUMA Nodes | 1 (CPU 0-19) |
 | Virtualization | VT-x |
+| Vulnerability L1TF | Not affected |
 
 ---
 
-## GPU
+## 🎮 GPU
 
 | Field | Value |
 |-------|-------|
@@ -62,20 +75,24 @@ description: Full hardware + software specification for sethengine's workstation
 | NVCC | V13.2.78 |
 | Bus | PCIe 4.0 x16 @ 02:00.0 |
 | Power Limit | 184 W |
-| Temp | 40°C (idle) |
+| Current Power | 30 W (idle, P1 state) |
+| Temp | 40°C (idle, fan 34%) |
+| VBIOS | — |
+| Persistence Mode | On |
 
-### Active GPU Processes
+### Active GPU Processes (SMI)
 - kwin_wayland (152 MiB)
 - Xwayland (2 MiB)
 - plasmashell (316 MiB)
 - Hermes Desktop (177 MiB)
+- Alacritty (57 MiB + 17 MiB)
 - Zed Editor (485 MiB)
-- Steam (38 MiB)
 - EasyEffects (48 MiB)
+- Steam (4 MiB + 34 MiB)
 
 ---
 
-## Memory
+## 🧮 Memory
 
 | Field | Value |
 |-------|-------|
@@ -84,23 +101,27 @@ description: Full hardware + software specification for sethengine's workstation
 | Speed | 5600 MT/s (configured) |
 | Voltage | 1.25 V |
 | Max Capacity | 128 GiB (board limit) |
+| MemTotal (kernel) | ~62.5 GiB (~65.5 GB) |
 | HugePages | 2048 × 2 MB (pre-allocated) |
 
 ---
 
-## Storage
+## 💾 Storage
+
+### NVMe Drives
 
 | Device | Model | Size | Firmware | Health |
 |--------|-------|------|----------|--------|
 | `nvme0n1` | WD_BLACK SN850X 2000GB | 1.8 TiB | 620361WD | 0% used, 39°C |
 | `nvme1n1` | KINGSTON SA2000M81000G | 931.5 GiB | S5Z42105 | 9% used, 34°C |
 
+### Partitions
 - **Root**: `/dev/nvme1n1p4` on `/` — 85 GiB total, 39 GiB used (49%)
 - **Swap**: `/dev/nvme1n1p2` — 15.6 GiB (1.1 MiB used)
 
 ---
 
-## Display
+## 🖥 Display
 
 | Field | Value |
 |-------|-------|
@@ -113,7 +134,7 @@ description: Full hardware + software specification for sethengine's workstation
 
 ---
 
-## Audio
+## 🔊 Audio
 
 | Field | Value |
 |-------|-------|
@@ -121,35 +142,40 @@ description: Full hardware + software specification for sethengine's workstation
 | Default Sink | `alc1220-analog-sink` (ALC1220, hw:1) |
 | Format | float32le 2ch 48000Hz |
 | Resampler | soxr-vhq |
+| Period Size | 512 |
 | Amplifier | Douk Audio (external) |
 | Headphones | Sony WH-1000XM3 (powered ON) |
 | DSP | EasyEffects — Bass → Exciter → EQ(8-11k cut) → Limiter |
+| ASound Cards | 0: HDA NVidia (GB206) · 1: HDA Intel PCH (ALC1220) |
 | Config Repo | [github.com/sethengine/alc1220-audio-config](https://github.com/sethengine/alc1220-audio-config) |
 
 ---
 
-## Input Devices
+## ⌨️ Input Devices
 
 | Device | Vendor:Product | Notes |
 |--------|---------------|-------|
 | Corsair Katar Pro XT | `1b1c:1bac` | Gaming mouse, keyd-remapped |
 | BY Tech Thor 230 | `331a:5020` | Keyboard, keyd-remapped |
 
+Both have `usbhid.quirks` in kernel cmdline for reduced latency.
+
 ---
 
-## Network
+## 🌐 Network
 
 | Interface | Type |
 |-----------|------|
 | `wlan0` | Intel Wi-Fi 7 BE200 (AX1775*/BE20*) — 802.11be 2×2 |
+| `lo` | Loopback |
 
 ---
 
-## Kernel Parameters (GRUB)
+## 🔧 Kernel Parameters (GRUB)
 
 ```
-intel_idle.max_cstate=1 tsx=on usbhid.mousepoll=1
-nvidia_drm.modeset=1 usbhid.kbpoll=1
+GRUB_CMDLINE_LINUX_DEFAULT="intel_idle.max_cstate=1 tsx=on
+usbhid.mousepoll=1 nvidia_drm.modeset=1 usbhid.kbpoll=1
 pcie_aspm.policy=performance sched_itmt_enabled=1 preempt=full
 pci=pcie_bus_perf pcie_ports=native vdso=2 skew_tick=1
 futex_waitv=1 udev.log_priority=3 workqueue.power_efficient=false
@@ -157,12 +183,17 @@ cpufreq.default_governor=performance intel_pstate=active
 threadirqs processor.max_cstate=1
 usbhid.quirks=0x1b1c:0x1bac:0x40,0x331a:0x5020:0x40
 usbcore.autosuspend=-1 hugepagesz=2M hugepages=2048
-drm.edid_firmware=DP-3:edid/hp-x34.bin
+drm.edid_firmware=DP-3:edid/hp-x34.bin"
+```
+
+### Loaded Kernel Modules (NVIDIA)
+```
+nvidia_drm    nvidia_uvm    nvidia_modeset    nvidia
 ```
 
 ---
 
-## Software Stack
+## 📦 Software Stack
 
 | Component | Version |
 |-----------|---------|
@@ -173,22 +204,29 @@ drm.edid_firmware=DP-3:edid/hp-x34.bin
 | Docker | 29.5.1 (build 2518b52d94) |
 | CUDA Toolkit | 13.2 (nvcc V13.2.78) |
 | GCC | 16.1.1 |
+| Hermes Agent | v0.18.2 (default profile) |
 | keyd | enabled + active |
-| PPD | inactive |
+| PPD (Power Profiles) | inactive |
 | SDDM | active |
 
 ### Notable User Config
 - **Emacs**: Doom Emacs 30.2, Wayland+XWayland (GTK3, not PGTK), classic Emacs keys (no evil), JetBrainsMono NF
 - **Editor**: Zed Editor
 - **Terminal**: Alacritty
-- **Theme preference**: light-but-not-white (textured grays, warm off-whites), high text contrast
+- **Theme preference**: light-but-not-white (textured grays, warm off-whites), high text contrast, text shadows
 - **ZSH plugins**: zsh-autosuggestions, zsh-syntax-highlighting, zsh-history-substring-search, zsh-you-should-use, zsh-z, zsh-bat
+- **GRUB quirks**: cstate+sync perf tuning
+- **KWin compositor**: OFF
 
 ---
 
-## How to Update This Spec
+## 🔄 How to Update This Spec
 
-When any component changes, use `edit` tool to update the relevant table(s) in this file.
+When any component changes (new hardware, OS upgrade, driver update, monitor change):
+
+1. Run `skill_view(name='system-spec')` to load this spec
+2. Read current values from the system (run the commands below)
+3. Call `skill_manage(action='patch', name='system-spec', ...)` to update the affected table(s)
 
 ### Quick Verification Commands
 
@@ -217,6 +255,7 @@ wpctl status | grep -A1 'Audio'
 
 # Kernel
 uname -a
+cat /proc/version
 cat /etc/os-release | head -3
 
 # Network

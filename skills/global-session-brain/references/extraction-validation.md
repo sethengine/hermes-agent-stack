@@ -33,7 +33,7 @@ valid_relations = {
     'shares_data_with', 'semantically_similar_to', 'rationale_for',
     'fixes', 'caused_by', 'depends_on', 'shares_config_with'
 }
-valid_confidences = {'EXTRACTED', 'INFERRED', 'AMBIGUOUS'}
+valid_confidences = {'EXTRACTED', 'INFERRED', 'AMBIGUOUS', 'DECLARED'}
 required_edge_fields = ['source', 'target', 'relation', 'confidence']
 
 for edge in edges:
@@ -46,7 +46,8 @@ for edge in edges:
     if edge['relation'] not in valid_relations:
         edge['relation'] = 'conceptually_related_to'
     
-    # 3. confidence must be EXTRACTED/INFERRED/AMBIGUOUS
+    # 3. confidence must be EXTRACTED/INFERRED/AMBIGUOUS/DECLARED
+    #    DECLARED is used by the inject-graph-nodes.py cron pipeline
     if edge['confidence'] not in valid_confidences:
         edge['confidence'] = 'INFERRED'
     
@@ -85,7 +86,7 @@ valid_relations = {'calls', 'implements', 'references', 'cites',
                    'conceptually_related_to', 'shares_data_with', 
                    'semantically_similar_to', 'rationale_for',
                    'fixes', 'caused_by', 'depends_on', 'shares_config_with'}
-valid_confs = {'EXTRACTED', 'INFERRED', 'AMBIGUOUS'}
+valid_confs = {'EXTRACTED', 'INFERRED', 'AMBIGUOUS', 'DECLARED'}
 
 for edge in extract['edges']:
     if edge.get('relation') not in valid_relations:

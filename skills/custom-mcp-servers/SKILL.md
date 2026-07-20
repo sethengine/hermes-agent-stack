@@ -346,12 +346,29 @@ Keep it in one file for zero-install portability:
 - **Python path mismatch**: The bridge shebang is `#!/usr/bin/env python3`, but `python3` may resolve to different interpreters (Hermes venv, system, pyenv). If the bridge imports httpx but only the venv has it, `ModuleNotFoundError` occurs on system python. Use the zero-dependency fallback pattern to avoid this — never hard-require non-stdlib packages in MCP bridges that users run from terminals.
 - **llama.cpp proxy toggle hidden in add form**: The "Use llama-server proxy" toggle only appears when EDITING an existing server, not when first adding one. Users searching for it during initial setup won't find it. Save the server first, then edit it to access the toggle. Also: the toggle is at the bottom of the form, below Custom Headers, requiring a scroll.
 - **`127.0.0.1` vs `localhost`**: llama.cpp WebUI users report connections that fail with `localhost` but succeed with `127.0.0.1`. Match the host form consistently — if the WebUI is on `127.0.0.1:8084`, use `127.0.0.1` for the MCP server URL too.
+- **OpenCode skills must be real directories**: OpenCode does not follow symlinks for skill discovery. A symlinked skill directory silently produces no skill — no error, no log. Always `cp -r` the resolved real directory. See `references/opencode-skill-import.md` for the bulk import script.
 
 ## Reference Files
 
 - `templates/mcp-server-template.py` — Copy-and-customize skeleton for new MCP servers
 - `references/searxng-bridge-example.md` — Full annotated example: multi-engine search bridge with dual transport
+- `references/opencode-skill-import.md` — OpenCode skill import procedure, symlink pitfalls, bulk import script
 
 For search-specific bridges (SearXNG, Trafilatura, DDG fallback), see the `mcp-search-bridge` skill — it has the validated tool scope, pitfall notes, and agent configs.
+
+## OpenCode Skill Import (vs Hermes)
+
+OpenCode and Hermes both support skills, but with one critical difference:
+
+**OpenCode does NOT follow symlinks for skill discovery.** All skills must be real directories. Symlink chains (e.g., `opencode/skills/X -> hermes/skills/X -> .agents/skills/X`) produce 0 skills — they silently don't appear. Every other skill in `~/.config/opencode/skills/` is a real directory; a lone symlink will be the one that doesn't show up.
+
+Copy skills as real directories, resolving the symlink chain with `readlink -f`:
+
+```bash
+REAL_SOURCE=$(readlink -f ~/.hermes/skills/last30days)
+cp -r "$REAL_SOURCE" ~/.config/opencode/skills/last30days
+```
+
+The frontmatter format is compatible between Hermes and OpenCode — no format conversion needed. See `references/opencode-skill-import.md` for the full bulk import script, destination validation, and edge cases.
 
 ## Why Docker MCP Bridges Break (MCP Spec)

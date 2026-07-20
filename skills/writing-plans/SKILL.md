@@ -1,6 +1,14 @@
 ---
 name: writing-plans
-description: Write implementation plans with bite-sized tasks, exact paths, complete code, and verification steps. For delegation to subagents.
+description: "Write implementation plans: bite-sized tasks, paths, code."
+version: 1.1.0
+author: Hermes Agent (adapted from obra/superpowers)
+license: MIT
+platforms: [linux, macos, windows]
+metadata:
+  hermes:
+    tags: [planning, design, implementation, workflow, documentation]
+    related_skills: [subagent-driven-development, test-driven-development, requesting-code-review]
 ---
 
 # Writing Implementation Plans
@@ -9,7 +17,7 @@ description: Write implementation plans with bite-sized tasks, exact paths, comp
 
 Write comprehensive implementation plans assuming the implementer has zero context for the codebase and questionable taste. Document everything they need: which files to touch, complete code, testing commands, docs to check, how to verify. Give them bite-sized tasks. DRY. YAGNI. TDD. Frequent commits.
 
-Assume the implementer is a skilled developer but knows almost nothing about the toolset or problem domain.
+Assume the implementer is a skilled developer but knows almost nothing about the toolset or problem domain. Assume they don't know good test design very well.
 
 **Core principle:** A good plan makes implementation obvious. If someone has to guess, the plan is incomplete.
 
@@ -18,11 +26,12 @@ Assume the implementer is a skilled developer but knows almost nothing about the
 **Always use before:**
 - Implementing multi-step features
 - Breaking down complex requirements
-- Delegating to subagents
+- Delegating to subagents via subagent-driven-development
 
 **Don't skip when:**
 - Feature seems simple (assumptions cause bugs)
 - You plan to implement it yourself (future you needs guidance)
+- Working alone (documentation matters)
 
 ## Bite-Sized Task Granularity
 
@@ -35,19 +44,34 @@ Every step is one action:
 - "Run the tests and make sure they pass" — step
 - "Commit" — step
 
-**Too big:** "Build authentication system" (50 lines across 5 files)
+**Too big:**
+```markdown
+### Task 1: Build authentication system
+[50 lines of code across 5 files]
+```
 
 **Right size:**
-- "Create User model with email field" (10 lines, 1 file)
-- "Add password hash field to User" (8 lines, 1 file)
-- "Create password hashing utility" (15 lines, 1 file)
+```markdown
+### Task 1: Create User model with email field
+[10 lines, 1 file]
+
+### Task 2: Add password hash field to User
+[8 lines, 1 file]
+
+### Task 3: Create password hashing utility
+[15 lines, 1 file]
+```
 
 ## Plan Document Structure
 
 ### Header (Required)
 
+Every plan MUST start with:
+
 ```markdown
 # [Feature Name] Implementation Plan
+
+> **For Hermes:** Use subagent-driven-development skill to implement this plan task-by-task.
 
 **Goal:** [One sentence describing what this builds]
 
@@ -62,14 +86,15 @@ Every step is one action:
 
 Each task follows this format:
 
-```markdown
+````markdown
 ### Task N: [Descriptive Name]
 
 **Objective:** What this task accomplishes (one sentence)
 
 **Files:**
 - Create: `exact/path/to/new_file.py`
-- Modify: `exact/path/to/existing.py:45-67`
+- Modify: `exact/path/to/existing.py:45-67` (line numbers if known)
+- Test: `tests/path/to/test_file.py`
 
 **Step 1: Write failing test**
 
@@ -102,33 +127,43 @@ Expected: PASS
 git add tests/path/test.py src/path/file.py
 git commit -m "feat: add specific feature"
 ```
-```
+````
 
 ## Writing Process
 
 ### Step 1: Understand Requirements
 
-Read and understand feature requirements, design documents, acceptance criteria, constraints.
+Read and understand:
+- Feature requirements
+- Design documents or user description
+- Acceptance criteria
+- Constraints
 
 ### Step 2: Explore the Codebase
 
-```bash
+Use Hermes tools to understand the project:
+
+```python
 # Understand project structure
-find src/ -name "*.py" | head -20
+search_files("*.py", target="files", path="src/")
 
 # Look at similar features
-grep -rn "similar_pattern" src/ --include="*.py"
+search_files("similar_pattern", path="src/", file_glob="*.py")
 
 # Check existing tests
-find tests/ -name "*.py" | head -20
+search_files("*.py", target="files", path="tests/")
 
 # Read key files
-cat src/app.py
+read_file("src/app.py")
 ```
 
 ### Step 3: Design Approach
 
-Decide: architecture pattern, file organization, dependencies, testing strategy.
+Decide:
+- Architecture pattern
+- File organization
+- Dependencies needed
+- Testing strategy
 
 ### Step 4: Write Tasks
 
@@ -155,6 +190,7 @@ Check:
 - [ ] File paths are exact
 - [ ] Code examples are complete (copy-pasteable)
 - [ ] Commands are exact with expected output
+- [ ] No missing context
 - [ ] DRY, YAGNI, TDD principles applied
 
 ### Step 7: Save the Plan
@@ -169,38 +205,82 @@ git commit -m "docs: add implementation plan for [feature]"
 ## Principles
 
 ### DRY (Don't Repeat Yourself)
+
 **Bad:** Copy-paste validation in 3 places
 **Good:** Extract validation function, use everywhere
 
 ### YAGNI (You Aren't Gonna Need It)
+
 **Bad:** Add "flexibility" for future requirements
 **Good:** Implement only what's needed now
 
+```python
+# Bad — YAGNI violation
+class User:
+    def __init__(self, name, email):
+        self.name = name
+        self.email = email
+        self.preferences = {}  # Not needed yet!
+        self.metadata = {}     # Not needed yet!
+
+# Good — YAGNI
+class User:
+    def __init__(self, name, email):
+        self.name = name
+        self.email = email
+```
+
 ### TDD (Test-Driven Development)
-Every task that produces code should include the full TDD cycle. See `test-driven-development` skill for details.
+
+Every task that produces code should include the full TDD cycle:
+1. Write failing test
+2. Run to verify failure
+3. Write minimal code
+4. Run to verify pass
+
+See `test-driven-development` skill for details.
 
 ### Frequent Commits
-Commit after every task: `git commit -m "type: description"`
+
+Commit after every task:
+```bash
+git add [files]
+git commit -m "type: description"
+```
 
 ## Common Mistakes
 
-| Mistake | Fix |
-|---------|-----|
-| Vague tasks ("Add authentication") | Specific ("Create User model with email and password_hash fields") |
-| Incomplete code ("Add validation function") | Include the complete function code |
-| Missing verification ("Test it works") | Exact command with expected output |
-| Missing file paths ("Create the model file") | Exact path ("Create: `src/models/user.py`") |
+### Vague Tasks
 
-## Delegation Handoff
+**Bad:** "Add authentication"
+**Good:** "Create User model with email and password_hash fields"
 
-After saving the plan, use OpenCode's agent mentions to dispatch subagents:
+### Incomplete Code
 
-```
-@agent Implement Task 1 from the plan: [paste full task text with code, paths, commands]
-@agent Implement Task 2 from the plan: [paste full task text]
-```
+**Bad:** "Step 1: Add validation function"
+**Good:** "Step 1: Add validation function" followed by the complete function code
 
-Each subagent gets the complete task text in its context — never make subagents read the plan file.
+### Missing Verification
+
+**Bad:** "Step 3: Test it works"
+**Good:** "Step 3: Run `pytest tests/test_auth.py -v`, expected: 3 passed"
+
+### Missing File Paths
+
+**Bad:** "Create the model file"
+**Good:** "Create: `src/models/user.py`"
+
+## Execution Handoff
+
+After saving the plan, offer the execution approach:
+
+**"Plan complete and saved. Ready to execute using subagent-driven-development — I'll dispatch a fresh subagent per task with two-stage review (spec compliance then code quality). Shall I proceed?"**
+
+When executing, use the `subagent-driven-development` skill:
+- Fresh `delegate_task` per task with full context
+- Spec compliance review after each task
+- Code quality review after spec passes
+- Proceed only when both reviews approve
 
 ## Remember
 
@@ -215,3 +295,30 @@ Frequent commits
 ```
 
 **A good plan makes implementation obvious.**
+
+---
+
+# Appendix A: Plan Mode (Quick Plans)
+
+When the user wants a plan *instead of execution* — no code, no edits, just a markdown plan saved under `.hermes/plans/YYYY-MM-DD_HHMMSS-<slug>.md`.
+
+**Rules for this mode:**
+- Do not implement code.
+- Do not edit project files except the plan markdown file.
+- Do not run mutating terminal commands, commit, push, or perform external actions.
+- Read-only inspection is allowed.
+- Deliverable: a concrete markdown plan with goal, context, approach, step-by-step tasks, files likely to change, tests/validation, and risks/tradeoffs.
+
+---
+
+# Appendix B: Spike Mode (Throwaway Experiments)
+
+When the user wants to **feel out an idea** before committing to a real build — validating feasibility, comparing approaches, or surfacing unknowns.
+
+**Trigger phrases:** "let me try this", "I want to see if X works", "spike this out", "quick prototype of Z", "is this even possible?", "compare A vs B".
+
+**Rules:**
+- Spikes are disposable by design. Throw them away once they've paid their debt.
+- Do NOT use when the answer is knowable from docs — just do research.
+- Do NOT use for production path work — use the main planning process above.
+- Goal: learn, not ship. The verdict is a yes/no/can't-tell with evidence, not polished code.

@@ -14,6 +14,7 @@ PC → ALC1220 analog line-out → Douk Audio amp → Sony WH-1000XM3 (aux cable
 This skill ships with:
 - `references/error-transcripts.md` — exact dmesg, pw-dump, coredump, and ALSA codec transcripts from real debugging sessions
 - `references/llm-context.md` — condensed LLM-facing quick-reference for other AI agents
+- `references/effective-ee-chain.md` — current EasyEffects bypass-state audit and effective processing path (updated 2026-07-18)
 
 ## Config Files Located
 
@@ -83,29 +84,23 @@ default.clock.max-quantum   = 8192
 ### 7. Volume Resets to 0 After Idle/Pause (Suspend/Resume Bug)
 **Symptom:** Audio works during first playback. After all streams stop and restart, headphone volume is 0 and no sound comes out.
 **Root cause:** When PipeWire suspends an idle ALSA node, the codec powers down and reinitializes with default mixer state (headphone = muted). On resume, the default state (volume=0) is restored, not the user's setting.
-**Fix (two parts):**
+**Fix (three options, best first):**
 
-**Part A — Prevent suspend entirely:** Add `node.suspend = false` to the alc1220 sink adapter config so the ALSA device never goes through suspend/resume:
-```ini
-# in alsa-sink-alc1220.conf adapter args
-node.suspend = false        # prevent ALSA codec reset on suspend/resume
-```
+**Option A — Software mixer (recommended):** Add `api.alsa.soft-mixer = true` to the alc1220 sink adapter args. PipeWire handles volume in software — ALSA hardware mixer state is irrelevant and the headphone mute register can stay at 0 without affecting playback. No retry scripts needed.
 
-**Part B — Retry script on PipeWire startup:** The adapter opens the ALSA device AFTER `context.exec` runs, so any volume-fix commands in `context.exec` execute too early. Add this retry script instead:
+**Option B — Prevent suspend:** Add `node.suspend = false` to the adapter args so the ALSA device never suspends. Volume stays set because the codec never powers down.
+
+**Option C — Retry script:** If using context.exec, the adapter opens the ALSA device AFTER exec runs, so any amixer commands execute too early. Use a retry loop:
 ```bash
 # ~/.local/bin/ensure-alc1220-volume.sh
-for i in $(seq 1 10); do
-    /usr/bin/amixer -c1 cset numid=3 87,87 2>/dev/null && \
+for i in $(seq 1 30); do
+    /usr/bin/amixer -c1 cset numid=3 87,87 2>/dev/null
     /usr/bin/amixer -c1 cset numid=4 on,on 2>/dev/null
-    STATUS=$?
-    if [ "$STATUS" = 0 ] && [ "$(/usr/bin/amixer -c1 cget numid=3 2>/dev/null | grep -c 'values=87,87')" -gt 0 ]; then
-        exit 0
-    fi
+    STATUS=$(/usr/bin/amixer -c1 cget numid=3 2>/dev/null | grep -c 'values=87,87')
+    [ "$STATUS" -gt 0 ] && exit 0
     sleep 1
-done
-exit 1
+done; exit 1
 ```
-
 Then in `pipewire.conf context.exec`:
 ```ini
 { path = "/home/sethengine/.local/bin/ensure-alc1220-volume.sh" args = "" }
@@ -138,12 +133,50 @@ PipeWire handles the F32P→S32LE conversion at the graph level. HW params confi
 - Format: `S32LE` in sink adapter args (no underscore, no quotes)
 - Default format: `"F32_LE"` in pipewire.conf context.properties (underscore OK here)
 
+## Max-Quality Config (Researched 2026-07-18)
+
+Research source: AudioScienceReview bit-perfect guide + PipeWire official docs + soxr library docs + ALSA hardware capabilities. Cross-verified across 3+ independent sources.
+
+### Optimal Adapter Args (alsa-sink-alc1220.conf)
+
+Add these to the `args` block for maximum quality and stability:
+
+```
+resample.disable          = true     # bypass SRC entirely when rates match
+monitor.channel-volumes   = false    # clean signal path, no per-channel volume
+channelmix.upmix          = false    # prevents stereo smearing (default is TRUE!)
+channelmix.mix-lfe        = false    # no subwoofer processing
+channelmix.normalize      = false    # don't modify levels
+node.suspend              = false    # prevent codec power-cycling
+api.alsa.soft-mixer       = true     # software volume ignores hw mixer reset
+priority.driver           = 9000     # wins over auto-detected sinks
+priority.session          = 9000
+```
+
+**Why:** ALC1220 DAC is a 24-bit converter. F32 mantissa (24-bit) covers all 2^24 integer values exactly. S32LE transport → 24-bit DAC conversion loses no information. soxr at any quality above default is transparent (-175dB distortion), but `resample.disable=true` avoids SRC entirely when source and sink rates match. `channelmix.upmix=true` (the PipeWire default!) upmixes stereo to multi-channel unnecessarily, smearing the stereo image.
+
+### Format Chain (final)
+
+```
+App → EE (F32P) → PW graph mixer (F32P→S32LE) → alc1220-sink (S32LE) → ALSA front:1 (S32_LE) → ALC1220 DAC
+```
+
+- ALC1220: `bits: 16 20 24 32` (integer only, no float)
+- `aplay --dump-hw-params` confirms only `S16_LE S32_LE` supported (no S24_LE)
+- EE always processes in F32P regardless — conversion is unavoidable
+
 ## Restoration after reinstall
 1. Install pipewire, wireplumber, pipewire-pulse, easyeffects
 2. Copy config files from ~/.config/pipewire/ and ~/.config/easyeffects/
 3. Copy /etc/modprobe.d/snd-intel-dspcfg.conf
 4. `sudo mkinitcpio -P && sudo reboot`
 5. Enable and start alc1220-audio.service
+
+## Workflow Rules (user preference)
+- **Investigate vs fix:** When asked to investigate, DO NOT make changes — only gather information and report. The user will explicitly say "set" or "apply" when they want changes made.
+- **No service restarts without permission:** Each PipeWire restart triggers the adapter to reopen hw:1, resetting the codec state. Use direct `amixer` commands for live volume changes.
+- **Direct fixes, not deep dives:** The user wants things to work, not multi-step debugging. When stuck between isolating a problem and making it work, choose making it work.
+- **Keep it brief:** Output commands and results, not explanations. The user communicates in shorthand ("s", "f", "a") and expects the same efficiency back.
 
 ## GitHub Repo (public)
 Full config mirror + LLM manifest: [GitHub: sethengine/alc1220-audio-config](https://github.com/sethengine/alc1220-audio-config)

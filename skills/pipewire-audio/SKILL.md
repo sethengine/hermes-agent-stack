@@ -271,7 +271,7 @@ Audio flows: **App → easyeffects_sink → EE plugins chain → physical sink**
 ### Plugin Chain Storage
 
 - **Main config**: `~/.config/easyeffects/db/easyeffectsrc`
-- **Per-plugin settings**: `~/.config/easyeffects/db/<plugin>rc`
+- **Per-plugin settings**: `~/.config/easyeffects/db/<plugin>rc` — INI format with `[soe][PluginName#N]` sections
 - **Output presets**: `~/.config/easyeffects/output/*.json`
 - **Input presets**: `~/.config/easyeffects/input/*.json`
 
@@ -284,6 +284,41 @@ In `easyeffectsrc` under `[StreamOutputs]`:
 outputDevice=alc1220-analog-sink
 plugins=bass_enhancer#0,bass_loudness#0,equalizer#0,equalizer#1,pitch#0,exciter#0,crystalizer#0,equalizer#2,equalizer#3,limiter#0,deepfilternet#0,stereo_tools#0
 ```
+
+### ⚠️ Reading Plugin Bypass States
+
+The `plugins=` line in `easyeffectsrc` lists **all configured plugins** — both active and bypassed. To determine the **actual effective chain**, check each plugin's per-plugin `rc` file for the `bypass` flag under its `[soe][PluginName#N]` section:
+
+The `rc` files use INI-format sections (not JSON). The plugin name from the `plugins=` list maps to a section in `<plugin>rc`:
+- `bass_enhancer#0` → `[soe][BassEnhancer#0]` in `bassEnhancerrc`
+- `equalizer#0` → `[soe][Equalizer#0]` in `equalizerrc`
+- `limiter#0` → `[soe][Limiter#0]` in `limiterrc`
+
+**Key rule**: if the section has no `bypass` key at all, the plugin is **active**. Only plugins with `bypass=true` explicitly set are skipped.
+
+```bash
+# Quick dump of all plugin bypass states
+for f in ~/.config/easyeffects/db/*rc; do
+  name=$(basename "$f")
+  echo "=== $name ==="
+  grep -E "^\[soe\]|^bypass=" "$f"
+  echo
+done
+```
+
+**Output interpretation:**
+```ini
+# ACTIVE — no bypass key present
+[soe][BassEnhancer#0]
+amount=6.06
+
+# BYPASSED — bypass=true present
+[soe][Exciter#0]
+bypass=true
+amount=3.42
+```
+
+**Common pitfall**: Do NOT assume all plugins on the `plugins=` line are running. On a typical user-configured chain, 50-75% may be bypassed. The bypassed plugins still appear in the list because EE preserves the full chain layout; they just pass audio through unmodified. Always verify by checking the actual `bypass` flags before describing which processing is active.
 
 ### Adding an EQ to the Chain
 
@@ -675,6 +710,8 @@ cat /proc/asound/card1/codec#0
 - **`hw:N` paths change after driver rebind** — Unbinding/re-binding the NVIDIA HDMI audio can change ALSA card indices. Use card names instead of numbers when possible.
 - **SATA controller disabled in BIOS = no hotplug** — If the SATA controller doesn't appear in lspci, it's BIOS-disabled and cannot be hot-added. Need reboot + BIOS change.
 - **EasyEffects saves state on exit** — Killing EasyEffects (SIGKILL) is safer than graceful shutdown if you want to preserve a known-good config file. Graceful shutdown overwrites config with current (possibly broken) state.
+
+- **Misreading the EE plugin chain — assuming all listed plugins are active** — The `plugins=` line in `~/.config/easyeffects/db/easyeffectsrc` lists every plugin that was ever added to the chain, including those the user bypassed. Presenting all 12 plugins as "the processing chain" without checking bypass flags is misleading. Always cross-reference each plugin's `rc` file for `bypass=true` before describing active processing. About 50-75% of plugins may be bypassed on a curated chain.
 
 - **Unquoted SPA-JSON strings cause &quot;Expected object key&quot; syntax error** — In PipeWire config files, string values in `context.objects` / `args` blocks MUST be quoted. Bare words like `resample.method = soxr` are parsed as key-value separators, not values. Fix: `resample.quality = 10` (quality 10 = soxr-vhq without needing method=soxr). The `resample.method` key uses string values (`&quot;speex-float-1&quot;`, `&quot;soxr&quot;`) and `resample.quality` uses integer values — only one is needed because quality 10 already selects soxr-vhq.
 

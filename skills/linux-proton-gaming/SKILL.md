@@ -103,6 +103,129 @@ Common causes:
 | `PROTON_ENABLE_NVAPI=1` | Enable DXVK-NVAPI (for DLSS/Reflex support) |
 | `PROTON_ENABLE_WAYLAND=0` | Force XWayland instead of native Wayland — fixes some fullscreen/settings bugs |
 
+## Game Input Issues on KDE Wayland (Cursor Capture Loss)
+
+**Symptom:** Mouse cursor escapes the game window (turns into the KDE cursor, becomes non-interactive). The game's raw input capture breaks and falls through to the compositor.
+
+### Root Cause
+
+KWin's compositor can interfere with SDL's mouse confinement (`SDL_SetRelativeMouseMode` / `SDL_WarpMouseInWindow`). Under KDE Wayland, when the game loses focus momentarily (Alt+Tab, notification popup, Steam overlay), SDL may fail to recapture the cursor.
+
+### Fixes (try in order)
+
+1. **SDL mouse confine env var** — Steam launch options:
+   ```
+   SDL_VIDEO_MINIMIZE_ON_FOCUS_LOSS=0 %command%
+   ```
+   Prevents SDL from minimizing on focus loss, keeping mouse capture alive.
+
+2. **Disable Steam Overlay** — Steam → game → Properties → uncheck "Enable Steam Overlay while in-game". The overlay can trigger a focus-loss→capture-release cycle.
+
+3. **Force fullscreen exclusive mode** — add to launch options:
+   ```
+   SDL_VIDEO_MINIMIZE_ON_FOCUS_LOSS=0 %command% -fullscreen -window_mode exclusive
+   ```
+
+4. **Alt+Enter cycle** — when cursor is already lost mid-game, press Alt+Enter twice to force a window mode toggle that reinitializes mouse confinement.
+
+5. **SDL_MOUSE_FOCUS_CLICKTHROUGH** — create/edit `~/.config/environment.d/gameenv.conf`:
+   ```
+   SDL_MOUSE_FOCUS_CLICKTHROUGH=1
+   ```
+   Then relog. Lets the game re-grab the mouse on click without requiring explicit focus.
+
+6. **KWin compositor suspend for fullscreen** — System Settings → Display → Compositor → "Allow applications to block compositing" = ON. This prevents KWin from intercepting mouse events during exclusive fullscreen.
+
+### Affected Games
+
+- **Dota 2** (Source 2 engine, SDL2) — most commonly reported on KDE Wayland
+- Any Source/Unity game using SDL raw mouse input under KDE Wayland
+
+### References
+
+- `references/dota-2.md` — Dota 2-specific settings and known issues
+- SDL bug tracker: https://github.com/libsdl-org/SDL/issues (search "relative mouse mode Wayland")
+
+## Steam Cloud Sync Errors (CEF Web Layer)
+
+**Symptom:** Steam shows error code `-379` with "Failed to load web page (unknown error)" when trying to sync cloud saves. The error maps to Chromium's `ERR_HTTP_RESPONSE_CODE_FAILURE` — Steam's CEF browser received a non-2xx HTTP response from Valve's cloud sync API.
+
+This is **not a general network issue** — Steam connects and games launch normally. It's a CEF subprocess failure against Valve's internal API endpoint.
+
+### Root Cause
+
+Steam's CEF (Chromium Embedded Framework) requests a cloud sync web page from `steamloopback.host` or Valve's API. When the server returns an error status (redirect loop, 502, 503, or similar), CEF raises `ERR_HTTP_RESPONSE_CODE_FAILURE` (-379).
+
+On Linux, common triggers:
+- **Bugged Proton prefix at compatdata/0/** — leftover from Proton installations can interfere with Steam's CEF initialization
+- **Corrupted CEF cache** — `appcache/` and `package/` directories accumulate stale web state
+- **Steam runtime update mismatch** — CEF binary updated but cache wasn't invalidated
+- **Transient Valve backend issue** — server-side error that self-resolves
+- **GPU→renderer IPC corruption over XWayland (NVIDIA Wayland)** — when GPU accelerated rendering is ON, NVIDIA's driver can corrupt IPC between the GPU process and renderer process, causing Chromium to terminate the renderer:
+  ```
+  ERROR:bad_message.cc(29)] Terminating renderer for bad IPC message, reason 213
+  ```
+  This manifests as the same Error -379 but in web views (Store, Library, cloud sync UI) rather than cloud sync specifically. The fix is gamescope (see "Steam Client Rendering Issues" section). `STEAM_FORCE_WAYLAND=1` is **not supported** by Steam's launch scripts and has no effect.
+  Note: the cloud sync error differs from the store/library -379 — cloud sync error happens after login during sync attempt, store/library -379 happens when navigating web views. Check cef_log.txt for `bad_message` to confirm IPC corruption path.
+
+### Fixes (try in order)
+
+1. **Delete bugged Proton prefix (app ID 0)** — most common fix:
+   ```bash
+   rm -rf ~/.steam/steam/steamapps/compatdata/0/
+   rm -rf ~/.local/share/Steam/steamapps/compatdata/0/
+   ```
+   Restart Steam afterward.
+
+2. **Clear CEF web cache** — nuke all cached web state:
+   ```bash
+   killall steam
+   sleep 2
+   rm -rf ~/.steam/steam/appcache/*
+   rm -rf ~/.steam/steam/package
+   rm -rf ~/.steam/steam/depotcache/*
+   ```
+
+3. **Toggle Steam Beta / Stable** — Steam → Settings → Interface → Client Beta Participation. Switching forces a full CEF update/reinstall.
+
+4. **Launch with sandbox disabled** (bypasses CEF sandbox issues):
+   ```bash
+   steam -no-cef-sandbox
+   ```
+
+5. **Check Valve backend** — transient outage:
+   - https://steamstat.us
+   - Try offline mode → then switch online
+
+6. **Full CEF cache nuke** (nuclear option):
+   ```bash
+   killall steam
+   sleep 2
+   rm -rf ~/.steam/steam/appcache \
+          ~/.steam/steam/depotcache \
+          ~/.steam/steam/package \
+          ~/.steam/steam/steamapps/shadercache \
+          ~/.steam/steam/steamapps/temp \
+          ~/.steam/steam/ubuntu12_32/steam-runtime
+   ```
+
+### Verification
+
+Run this before and after fixes:
+```bash
+getent hosts steamloopback.host
+```
+Must return `127.0.0.1` instantly (no hang). Slow resolution means `/etc/nsswitch.conf` needs `mdns_minimal` instead of plain `mdns`:
+```
+hosts: mymachines mdns_minimal [NOTFOUND=return] resolve [!UNAVAIL=return] files myhostname dns
+```
+
+### References
+
+- `references/steam-cloud-sync-error-379.md` — error diagnostics and session evidence
+- Chromium `net/base/net_error_list.h`: `NET_ERROR(HTTP_RESPONSE_CODE_FAILURE, -379)`
+- https://wiki.archlinux.org/title/Steam/Troubleshooting#Very_long_startup_and_slow_user_interface_response
+
 ## Steam Client Rendering Issues (NVIDIA + Wayland)
 
 The Steam client itself (not games) uses CEF/Chromium for web views (Store, Library, overlay). On NVIDIA + Wayland there's a known catch-22:
@@ -122,6 +245,15 @@ disabled via blocklist, about:flags or the command line.
 ```
 
 If all GPU memory buffers show `Software only`, GPU compositing is off.
+
+When GPU accel IS enabled but Error -379 persists, check `~/.local/share/Steam/logs/cef_log.txt`:
+
+```
+ERROR:bad_message.cc(29)] Terminating renderer for bad IPC message, reason 213
+ERROR:zygote_communication_linux.cc(292)] Failed to send GetTerminationStatus message to zygote
+```
+
+This means the GPU process IS running but the GPU→renderer IPC messages are corrupted over XWayland with NVIDIA's driver. Chromium kills the renderer on bad IPC, giving Error -379 and black squares where web views should render. This is distinct from the cloud-sync -379 documented below — same error code, different root cause chain.
 
 ### Fixes (try in order)
 
@@ -145,11 +277,38 @@ If all GPU memory buffers show `Software only`, GPU compositing is off.
    ```
    Without a compositor, XWayland windows get no composition pass, making rendering bugs more visible.
 
-4. **Steam native Wayland (experimental)**:
+4. **Run Steam inside gamescope (reliable fix)**:  
+   `STEAM_FORCE_WAYLAND=1` is a **placebo** — it is NOT handled by Steam's launch scripts (`steam.sh`, `steamwebhelper.sh`). It does nothing. The proven fix is gamescope, which provides its own X11 environment, bypassing the host XWayland that corrupts CEF GPU IPC:
+
    ```
-   STEAM_FORCE_WAYLAND=1 steam
+   gamescope -w 3440 -h 1440 -- steam
    ```
-   May bypass XWayland rendering issues entirely. Has its own quirks.
+
+   When GPU accel is ON but Error -379 persists, check `cef_log.txt`:
+   ```
+   ERROR:bad_message.cc(29)] Terminating renderer for bad IPC message, reason 213
+   ```
+   The web helper IS running with GPU compositing enabled, but the GPU→renderer IPC messages are corrupted over XWayland. Chromium terminates the renderer, giving black web views and Error -379.
+
+   This also manifests as "cannot connect to internet" in the Steam UI — the store/library web views fail to render, which looks like a network error. Actual network connectivity is fine (Steam downloads manifests, curl to Steam servers succeeds, SteamID gets set).
+
+   **Desktop entry wrapper (persistent fix):**
+
+   ```bash
+   #!/bin/bash
+   # ~/.local/bin/steam-wrapper
+   qdbus org.kde.KWin /Compositor resume 2>/dev/null
+   gamescope -w 3440 -h 1440 -- steam "$@"
+   sleep 2
+   qdbus org.kde.KWin /Compositor suspend 2>/dev/null
+   ```
+
+   Then set the desktop entry:
+   ```
+   Exec=/home/user/.local/bin/steam-wrapper %U
+   ```
+
+   The wrapper enables KWin compositor (fixes XWayland window composition), runs Steam inside gamescope (clean X11 environment, no IPC corruption), then suspends compositor after exit (back to game latency mode).
 
 ### Mitigations when GPU accel is off
 
@@ -410,6 +569,8 @@ Look for:
 ## Useful References
 
 - `references/d2r-infernal-edition.md` — D2R-specific settings, DLSS paths, and known issues
+- `references/dota-2.md` — Dota 2 settings, mouse cursor capture, cloud sync fixes
 - `references/mangohud-config.md` — Comprehensive MangoHud configuration option reference
 - `references/steam-client-wayland-issues.md` — Steam client rendering issues on NVIDIA + Wayland (diagnosis, workarounds, upstream issues)
+- `references/steam-cloud-sync-error-379.md` — Steam error -379 diagnostics and CEF web layer troubleshooting
 - References for other games can be added under `references/<game>.md`

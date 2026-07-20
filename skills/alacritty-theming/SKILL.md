@@ -19,6 +19,13 @@ triggers:
 
 End-to-end guide for working with Alacritty color themes: designing palettes, writing `.toml` theme files, applying themes, and building switchers.
 
+## Performance Quick Check
+
+When Alacritty feels slow or laggy, before tuning themes or shell config:
+- **Force GLES2 + EGL**: add `[debug]` with `renderer = "Gles2"` and `prefer_egl = true` — especially impactful on NVIDIA + XWayland where GLX translation overhead adds latency
+- See `references/rendering-backend.md` for full backend config details
+- See `references/terminal-latency-diagnosis.md` for shell-side diagnosis
+
 ## Alacritty Theme TOML Format
 
 A theme file has these sections:
@@ -208,3 +215,4 @@ Mixing formats in the same file can confuse grepping for the import path.
 - `references/opencode-themes.md` — creating OpenCode themes that match your Alacritty palette (JSON format, all tokens, community theme sources)
 - `references/terminal-rendering-troubleshooting.md` — fixing stale command text, theme reload issues, and font artifacts
 - `references/terminal-latency-diagnosis.md` — diagnosing terminal slowness: is it the emulator or the shell? covers zsh startup/keystroke latency, plugin overhead, async tuning, stale compdumps, and dual theme load
+- `references/rendering-backend.md` — force OpenGL ES (GLES2) or OpenGL 3.3 renderer, force EGL display API, context creation priority chain, source-level details

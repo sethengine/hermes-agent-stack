@@ -1,6 +1,14 @@
 ---
 name: systematic-debugging
-description: 4-phase root cause debugging methodology. Understand bugs before fixing — no guessing, no symptom patches.
+description: "4-phase root cause debugging: understand bugs before fixing."
+version: 1.2.0
+author: Hermes Agent (adapted from obra/superpowers)
+license: MIT
+platforms: [linux, macos, windows]
+metadata:
+  hermes:
+    tags: [debugging, troubleshooting, problem-solving, root-cause, investigation]
+    related_skills: [test-driven-development, plan, subagent-driven-development]
 ---
 
 # Systematic Debugging
@@ -60,7 +68,7 @@ You MUST complete each phase before proceeding to the next.
 - Read stack traces completely
 - Note line numbers, file paths, error codes
 
-**Action:** Use `read` on the relevant source files. Use `grep` to find the error string in the codebase.
+**Action:** Use `read_file` on the relevant source files. Use `search_files` to find the error string in the codebase.
 
 ### 2. Reproduce Consistently
 
@@ -69,7 +77,7 @@ You MUST complete each phase before proceeding to the next.
 - Does it happen every time?
 - If not reproducible → gather more data, don't guess
 
-**Action:** Run the failing test or trigger the bug:
+**Action:** Use the `terminal` tool to run the failing test or trigger the bug:
 
 ```bash
 # Run specific failing test
@@ -123,14 +131,14 @@ THEN investigate that specific component.
 - Keep tracing upstream until you find the source
 - Fix at the source, not at the symptom
 
-**Action:** Use `grep` to trace references:
+**Action:** Use `search_files` to trace references:
 
-```bash
+```python
 # Find where the function is called
-grep -rn "function_name(" src/ --include="*.py"
+search_files("function_name(", path="src/", file_glob="*.py")
 
 # Find where the variable is set
-grep -rn "variable_name\s*=" src/ --include="*.py"
+search_files("variable_name\\s*=", path="src/", file_glob="*.py")
 ```
 
 ### Phase 1 Completion Checklist
@@ -155,7 +163,11 @@ grep -rn "variable_name\s*=" src/ --include="*.py"
 - Locate similar working code in the same codebase
 - What works that's similar to what's broken?
 
-**Action:** Use `grep` to find comparable patterns.
+**Action:** Use `search_files` to find comparable patterns:
+
+```python
+search_files("similar_pattern", path="src/", file_glob="*.py")
+```
 
 ### 2. Compare Against References
 
@@ -217,6 +229,7 @@ grep -rn "variable_name\s*=" src/ --include="*.py"
 - Simplest possible reproduction
 - Automated test if possible
 - MUST have before fixing
+- Use the `test-driven-development` skill
 
 ### 2. Implement Single Fix
 
@@ -257,6 +270,8 @@ pytest tests/ -q
 
 **Discuss with the user before attempting more fixes.**
 
+This is NOT a failed hypothesis — this is a wrong architecture.
+
 ---
 
 ## Red Flags — STOP and Follow Process
@@ -268,6 +283,8 @@ If you catch yourself thinking:
 - "Skip the test, I'll manually verify"
 - "It's probably X, let me fix that"
 - "I don't fully understand but this might work"
+- "Pattern says X but I'll adapt it differently"
+- "Here are the main problems: [lists fixes without investigation]"
 - Proposing solutions before tracing data flow
 - **"One more fix attempt" (when already tried 2+)**
 - **Each fix reveals a new problem in a different place**
@@ -281,13 +298,13 @@ If you catch yourself thinking:
 | Excuse | Reality |
 |--------|---------|
 | "Issue is simple, don't need process" | Simple issues have root causes too. Process is fast for simple bugs. |
-| "Emergency, no time for process" | Systematic debugging is FASTER than guess-and-check. |
+| "Emergency, no time for process" | Systematic debugging is FASTER than guess-and-check thrashing. |
 | "Just try this first, then investigate" | First fix sets the pattern. Do it right from the start. |
 | "I'll write test after confirming fix works" | Untested fixes don't stick. Test first proves it. |
 | "Multiple fixes at once saves time" | Can't isolate what worked. Causes new bugs. |
 | "Reference too long, I'll adapt the pattern" | Partial understanding guarantees bugs. Read it completely. |
 | "I see the problem, let me fix it" | Seeing symptoms ≠ understanding root cause. |
-| "One more fix attempt" (after 2+ failures) | 3+ failures = architectural problem. Question the pattern. |
+| "One more fix attempt" (after 2+ failures) | 3+ failures = architectural problem. Question the pattern, don't fix again. |
 
 ## Quick Reference
 
@@ -298,32 +315,62 @@ If you catch yourself thinking:
 | **3. Hypothesis** | Form theory, test minimally, one variable at a time | Confirmed or new hypothesis |
 | **4. Implementation** | Create regression test, fix root cause, verify | Bug resolved, all tests pass |
 
-## OpenCode Tool Integration
+## Hermes Agent Integration
 
 ### Investigation Tools
 
-- **`grep`** — Find error strings, trace function calls, locate patterns
-- **`glob`** — Find files by name pattern
-- **`read`** — Read source code for precise analysis
-- **`bash`** — Run tests, check git history, reproduce bugs
-- **`webfetch` / `websearch`** — Research error messages, library docs
+Use these Hermes tools during Phase 1:
 
-### Parallel Investigation with Agents
+- **`search_files`** — Find error strings, trace function calls, locate patterns
+- **`read_file`** — Read source code with line numbers for precise analysis
+- **`terminal`** — Run tests, check git history, reproduce bugs, check `top`/`btop` for CPU
+- **`web_search`/`web_extract`** — Research error messages, library docs
 
-For complex multi-component debugging, spawn investigation subagents:
+### With delegate_task
 
+For complex multi-component debugging, dispatch investigation subagents:
+
+```python
+delegate_task(
+    goal="Investigate why [specific test/behavior] fails",
+    context="""
+    Follow systematic-debugging skill:
+    1. Read the error message carefully
+    2. Reproduce the issue
+    3. Trace the data flow to find root cause
+    4. Report findings — do NOT fix yet
+
+    Error: [paste full error]
+    File: [path to failing code]
+    Test command: [exact command]
+    """,
+    toolsets=['terminal', 'file']
+)
 ```
-@agent Investigate why [specific test/behavior] fails in [component].
-Follow the systematic debugging skill:
-1. Read the error message carefully
-2. Reproduce the issue
-3. Trace the data flow to find root cause
-4. Report findings — do NOT fix yet
 
-Error: [paste full error]
-File: [path to failing code]
-Test command: [exact command]
-```
+### With test-driven-development
+
+When fixing bugs:
+1. Write a test that reproduces the bug (RED)
+2. Debug systematically to find root cause
+3. Fix the root cause (GREEN)
+4. The test proves the fix and prevents regression
+
+## Pitfalls
+
+### DON'T Write System Files During Investigation
+
+When investigating system crashes (especially kernel/GPU), resist the urge to write scripts to `/usr/local/bin/` or modify config files before the root cause is confirmed. File modifications are Phase 4 actions. During Phase 1–3, stick to read-only inspection: `journalctl`, `cat /proc/*`, `dmesg`, `nvidia-smi`. Opening an editor or writing a service file signals "I'm fixing" before you understand WHAT needs fixing. The user will call this out.
+
+### DON'T Jump to Kernel Parameter Changes
+
+When you see `isolcpus=`, `nohz_full=`, or other kernel parameters in `/proc/cmdline`, don't assume they're the problem. They often aren't. Investigate the actual crash trigger first — kernel parameters are background configuration, not crash triggers. The NVIDIA Xid pattern (see reference below) shows this clearly: 30 Xid faults were the cause, not the kernel tunables.
+
+## References
+
+- `references/electron-app-cpu-audit.md` — Systematic checklist for investigating high CPU/GPU usage in Electron desktop apps. Covers build config, polling loops, GPU compositor effects, WebGL render loops, xterm.js WebGL drain, main-process background tasks, and dependency bloat. Use this when the user reports "app uses too much CPU" for any Electron-based app.
+- `references/nvidia-gpu-xid-crash.md` — Diagnostic workflow for NVIDIA GPU Xid 31 MMU fault crashes on Linux. Covers NVDEC0 hardware video decoder faults triggered by Chrome/Firefox VA-API, the `VaapiIgnoreDriverChecks` flag pattern, IRQ distribution checking, and the full fix priority stack. Use when the system reboots without clean shutdown and there's no kernel oops/panic in journalctl.
+- `references/npm-workspace-audit-fix.md` — Debugging checklist for `npm audit fix` failures in npm workspace monorepos. Covers ENOLOCK (wrong working directory), `isDescendantOf`/`edgesOut` null errors (npm 11.x workspace bug), manual transitive dep upgrade strategy, and when `--force` is appropriate.
 
 ## Real-World Impact
 

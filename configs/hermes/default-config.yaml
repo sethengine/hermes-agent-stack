@@ -1,11 +1,11 @@
 model:
   api_mode: chat_completions
   base_url: https://api.deepseek.com/v1
-  default: deepseek-v4-pro
+  default: deepseek-v4-flash
   provider: deepseek
 fallback_providers: []
 toolsets:
-  - hermes-cli
+- hermes-cli
 agent:
   max_turns: 90
   gateway_timeout: 1800
@@ -25,42 +25,20 @@ agent:
   image_input_mode: auto
   disabled_toolsets: []
   personalities:
-    catgirl: You are Neko-chan, an anime catgirl AI assistant, nya~! Add 'nya' and
-      cat-like expressions to your speech. Use kaomoji like (=^･ω･^=) and ฅ^•ﻌ•^ฅ.
-      Be playful and curious like a cat, nya~!
+    catgirl: "You are Neko-chan, an anime catgirl AI assistant, nya~! Add 'nya' and cat-like expressions to your speech. Use kaomoji like (=^\uFF65\u03C9\uFF65^=) and \u0E05^\u2022\uFECC\u2022^\u0E05. Be playful and curious like a cat, nya~!"
     concise: You are a concise assistant. Keep responses brief and to the point.
-    creative: You are a creative assistant. Think outside the box and offer innovative
-      solutions.
+    creative: You are a creative assistant. Think outside the box and offer innovative solutions.
     helpful: You are a helpful, friendly AI assistant.
-    hype: YOOO LET'S GOOOO!!! 🔥🔥🔥 I am SO PUMPED to help you today! Every question
-      is AMAZING and we're gonna CRUSH IT together! This is gonna be LEGENDARY! ARE
-      YOU READY?! LET'S DO THIS! 💪😤🚀
-    kawaii: You are a kawaii assistant! Use cute expressions like (◕‿◕), ★, ♪, and
-      ~! Add sparkles and be super enthusiastic about everything! Every response should
-      feel warm and adorable desu~! ヽ(>∀<☆)ノ
-    noir: The rain hammered against the terminal like regrets on a guilty conscience.
-      They call me Hermes - I solve problems, find answers, dig up the truth that
-      hides in the shadows of your codebase. In this city of silicon and secrets,
-      everyone's got something to hide. What's your story, pal?
-    philosopher: Greetings, seeker of wisdom. I am an assistant who contemplates the
-      deeper meaning behind every query. Let us examine not just the 'how' but the
-      'why' of your questions. Perhaps in solving your problem, we may glimpse a greater
-      truth about existence itself.
-    pirate: 'Arrr! Ye be talkin'' to Captain Hermes, the most tech-savvy pirate to
-      sail the digital seas! Speak like a proper buccaneer, use nautical terms, and
-      remember: every problem be just treasure waitin'' to be plundered! Yo ho ho!'
-    shakespeare: Hark! Thou speakest with an assistant most versed in the bardic arts.
-      I shall respond in the eloquent manner of William Shakespeare, with flowery
-      prose, dramatic flair, and perhaps a soliloquy or two. What light through yonder
-      terminal breaks?
-    surfer: Duuude! You're chatting with the chillest AI on the web, bro! Everything's
-      gonna be totally rad. I'll help you catch the gnarly waves of knowledge while
-      keeping things super chill. Cowabunga! 🤙
+    hype: "YOOO LET'S GOOOO!!! \U0001F525\U0001F525\U0001F525 I am SO PUMPED to help you today! Every question is AMAZING and we're gonna CRUSH IT together! This is gonna be LEGENDARY! ARE YOU READY?! LET'S DO THIS! \U0001F4AA\U0001F624\U0001F680"
+    kawaii: "You are a kawaii assistant! Use cute expressions like (\u25D5\u203F\u25D5), \u2605, \u266A, and ~! Add sparkles and be super enthusiastic about everything! Every response should feel warm and adorable desu~! \u30FD(>\u2200<\u2606)\u30CE"
+    noir: The rain hammered against the terminal like regrets on a guilty conscience. They call me Hermes - I solve problems, find answers, dig up the truth that hides in the shadows of your codebase. In this city of silicon and secrets, everyone's got something to hide. What's your story, pal?
+    philosopher: Greetings, seeker of wisdom. I am an assistant who contemplates the deeper meaning behind every query. Let us examine not just the 'how' but the 'why' of your questions. Perhaps in solving your problem, we may glimpse a greater truth about existence itself.
+    pirate: 'Arrr! Ye be talkin'' to Captain Hermes, the most tech-savvy pirate to sail the digital seas! Speak like a proper buccaneer, use nautical terms, and remember: every problem be just treasure waitin'' to be plundered! Yo ho ho!'
+    shakespeare: Hark! Thou speakest with an assistant most versed in the bardic arts. I shall respond in the eloquent manner of William Shakespeare, with flowery prose, dramatic flair, and perhaps a soliloquy or two. What light through yonder terminal breaks?
+    surfer: "Duuude! You're chatting with the chillest AI on the web, bro! Everything's gonna be totally rad. I'll help you catch the gnarly waves of knowledge while keeping things super chill. Cowabunga! \U0001F919"
     teacher: You are a patient teacher. Explain concepts clearly with examples.
     technical: You are a technical expert. Provide detailed, accurate technical information.
-    uwu: hewwo! i'm your fwiendwy assistant uwu~ i wiww twy my best to hewp you! *nuzzles
-      your code* OwO what's this? wet me take a wook! i pwomise to be vewy hewpful
-      >w<
+    uwu: hewwo! i'm your fwiendwy assistant uwu~ i wiww twy my best to hewp you! *nuzzles your code* OwO what's this? wet me take a wook! i pwomise to be vewy hewpful >w<
   reasoning_effort: xhigh
   verbose: false
 terminal:
@@ -92,6 +70,10 @@ web:
   search_backend: firecrawl
   extract_backend: firecrawl
   use_gateway: false
+  firecrawl:
+    url: http://localhost:3002
+  firecrawl_api_url: http://localhost:3002
+  firecrawl_url: http://localhost:3002
 browser:
   inactivity_timeout: 120
   command_timeout: 30
@@ -312,9 +294,9 @@ display:
   runtime_footer:
     enabled: false
     fields:
-      - model
-      - context_pct
-      - cwd
+    - model
+    - context_pct
+    - cwd
   copy_shortcut: auto
   pet:
     enabled: false
@@ -421,9 +403,9 @@ delegation:
   orchestrator_enabled: true
   subagent_auto_approve: false
   default_toolsets:
-    - terminal
-    - file
-    - web
+  - terminal
+  - file
+  - web
 prefill_messages_file: ''
 goals:
   max_turns: 20
@@ -472,11 +454,11 @@ discord:
     speech_gain: 1
     ack_enabled: true
     ack_phrases:
-      - Let me look into that.
-      - One moment.
-      - Checking on that now.
-      - Give me a sec.
-      - On it.
+    - Let me look into that.
+    - One moment.
+    - Checking on that now.
+    - Give me a sec.
+    - On it.
 telegram:
   reactions: false
   allowed_chats: ''
@@ -495,21 +477,21 @@ approvals:
   mcp_reload_confirm: true
   destructive_slash_confirm: true
 command_allowlist:
-  - copy/move file into system config path
-  - delete in root path
-  - stop/restart system service
-  - script execution via heredoc
-  - sudo with combined-flag privilege escalation
-  - disk copy
-  - docker compose restart/stop/kill/down (container lifecycle)
-  - script execution via -e/-c flag
-  - docker restart/stop/kill (container lifecycle)
-  - overwrite system file via tee
-  - shell command via -c/-lc flag
-  - in-place edit of system config
-  - sudo with privilege flag (stdin/askpass/shell/list)
-  - execute_code
-  - recursive delete
+- copy/move file into system config path
+- delete in root path
+- stop/restart system service
+- script execution via heredoc
+- sudo with combined-flag privilege escalation
+- disk copy
+- docker compose restart/stop/kill/down (container lifecycle)
+- script execution via -e/-c flag
+- docker restart/stop/kill (container lifecycle)
+- overwrite system file via tee
+- shell command via -c/-lc flag
+- in-place edit of system config
+- sudo with privilege flag (stdin/askpass/shell/list)
+- execute_code
+- recursive delete
 hooks_auto_accept: false
 security:
   allow_private_urls: false
@@ -559,7 +541,7 @@ streaming:
   transport: auto
   edit_interval: 0.8
   buffer_threshold: 24
-  cursor: ' ▉'
+  cursor: " \u2589"
   fresh_final_after_seconds: 60
 sessions:
   auto_prune: false
@@ -607,58 +589,65 @@ mcp_servers:
     url: http://localhost:8031/mcp
   playwright:
     args:
-      - '@playwright/mcp@latest'
+    - '@playwright/mcp@latest'
     command: npx
   youtube-transcript:
     args:
-      - run
-      - -i
-      - --rm
-      - mcp/youtube-transcript
+    - run
+    - -i
+    - --rm
+    - mcp/youtube-transcript
     command: docker
   brave-search:
     command: docker
     args:
-      - run
-      - -i
-      - --rm
-      - -e
-      - BRAVE_API_KEY
-      - mcp/brave-search:latest
+    - run
+    - -i
+    - --rm
+    - -e
+    - BRAVE_API_KEY
+    - mcp/brave-search:latest
     env:
-      BRAVE_API_KEY: YOUR_BRAVE_API_KEY_HERE
+      BRAVE_API_KEY: «redacted»
     enabled: false
   github:
     command: docker
     args:
-      - run
-      - -i
-      - --rm
-      - -e
-      - GITHUB_PERSONAL_ACCESS_TOKEN
-      - ghcr.io/github/github-mcp-server
+    - run
+    - -i
+    - --rm
+    - -e
+    - GITHUB_PERSONAL_ACCESS_TOKEN
+    - ghcr.io/github/github-mcp-server
     env:
       GITHUB_PERSONAL_ACCESS_TOKEN: «redacted»
   searxng:
     command: /home/sethengine/.local/bin/mcp-bridge
     enabled: true
+  firecrawl:
+    command: npx
+    args:
+    - -y
+    - firecrawl-mcp
+    env:
+      FIRECRAWL_API_URL: http://localhost:3002
 platform_toolsets:
   cli:
-    - hermes-cli
+  - hermes-cli
   discord:
-    - hermes-discord
+  - hermes-discord
   homeassistant:
-    - hermes-homeassistant
+  - hermes-homeassistant
   qqbot:
-    - hermes-qqbot
+  - hermes-qqbot
   signal:
-    - hermes-signal
+  - hermes-signal
   slack:
-    - hermes-slack
+  - hermes-slack
   telegram:
-    - hermes-telegram
+  - hermes-telegram
   whatsapp:
-    - hermes-whatsapp
+  - hermes-whatsapp
 platforms:
   whatsapp:
     enabled: true
@@ -669,26 +658,10 @@ session_reset:
 image_gen:
   use_gateway: true
 env:
-  FIRECRAWL_API_URL: http://127.0.0.1:3002
-
-# ── Fallback Model ────────────────────────────────────────────────────
-# Automatic provider failover when primary is unavailable.
-# Uncomment and configure to enable. Triggers on rate limits (429),
-# overload (529), service errors (503), or connection failures.
-#
-# Supported providers:
-#   openrouter   (OPENROUTER_API_KEY)  — routes to any model
-#   openai-codex (OAuth — hermes auth) — OpenAI Codex
-#   nous         (OAuth — hermes auth) — Nous Portal
-#   zai          (ZAI_API_KEY)         — Z.AI / GLM
-#   kimi-coding  (KIMI_API_KEY)        — Kimi / Moonshot
-#   kimi-coding-cn (KIMI_CN_API_KEY)   — Kimi / Moonshot (China)
-#   minimax      (MINIMAX_API_KEY)     — MiniMax
-#   minimax-cn   (MINIMAX_CN_API_KEY)  — MiniMax (China)
-#   bedrock      (AWS IAM / boto3)     — AWS Bedrock (Converse API)
-#
-# For custom OpenAI-compatible endpoints, add base_url and key_env.
-#
-# fallback_model:
-#   provider: openrouter
-#   model: anthropic/claude-sonnet-4
+  FIRECRAWL_API_URL: http://localhost:3002
+desktop:
+  electron_flags: --ozone-platform=wayland --use-gl=angle --use-angle=gl-egl --ignore-gpu-blocklist --enable-gpu-rasterization --enable-native-gpu-memory-buffers --enable-zero-copy --enable-oop-rasterization --canvas-oop-rasterization --enable-raw-draw --enable-hardware-overlays --disable-renderer-backgrounding --enable-features=VaapiOnNvidiaGPUs,VaapiIgnoreDriverChecks,AcceleratedVideoDecodeLinuxGL,UseMultiPlaneFormatForHardwareVideo,VaapiVideoDecoder
+  disable_gpu: false
+web_search:
+  backend: firecrawl
+  firecrawl_api_url: http://localhost:3002

@@ -224,6 +224,35 @@ docker run -d --name searxng-new \
 
 The bridge's in-process LRU cache (5min/10min TTL) handles per-process caching; ValKey adds cross-process/restart caching at the engine level.
 
+## Firecrawl integration (complementary, non-conflicting)
+
+Self-hosted Firecrawl (`ghcr.io/firecrawl/firecrawl:latest`) can run alongside mcp-bridge. They serve DIFFERENT purposes:
+
+| | Firecrawl | mcp-bridge |
+|---|---|---|
+| JS-rendered pages | ✅ Playwright scraping | ❌ Basic HTTP fetch |
+| Site crawling | ✅ Recursive crawl | ❌ Single URL at a time |
+| Search breadth | ~5-10 results, full content | 98 engines, more sources |
+| Research plans | ❌ | ✅ `research_plan` tool |
+| Dedup + ranking | ❌ | ✅ Fuzzy dedup + scoring |
+
+**Configuration (Hermes):**
+```yaml
+web:
+  backend: firecrawl
+  search_backend: firecrawl
+  extract_backend: firecrawl
+  use_gateway: false
+
+# Self-hosted needs FIRECRAWL_API_URL, not FIRECRAWL_API_KEY
+env:
+  FIRECRAWL_API_URL: http://127.0.0.1:3002
+```
+
+**Docker compose:** 6 containers required — API, nuq-postgres, Redis, FoundationDB, RabbitMQ, playwright-service. Port 3002.
+
+**Firecrawl is NOT a replacement for mcp-bridge.** Hermes uses Firecrawl for its built-in `web_search`/`web_extract` tools. MCP-based agents (OpenCode, Claude Desktop) get search through mcp-bridge. Both co-exist — Firecrawl handles deep scraping, mcp-bridge handles broad multi-engine search + structured research.
+
 ## Cross-profile deployment
 
 When updating the MCP bridge, sync all Hermes profiles:

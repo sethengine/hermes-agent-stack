@@ -302,7 +302,7 @@ The `-e VARNAME` (without `=`) tells Docker to inherit the var from the host pro
 
 - **Don't assume tools exist**: Test that the target platform actually has the tool before referencing it. OpenCode's `grep` and `webfetch` are native tools; `execute_code` is not — use `bash` with python3 instead.
 - **Frontmatter is stricter in OpenCode**: Only `name`, `description`, and `trigger` are recognized. Extra fields are silently ignored but clutter the file.
-- **OpenCode discovers skills by directory**: Each skill must be in its own subdirectory with a `SKILL.md` file. A single `.md` file in the skills root won't be found.
+- **OpenCode discovers skills by directory**: Each skill must be in its own subdirectory with a `SKILL.md` file. A single `.md` file in the skills root won't be found. **Critical: must be a real directory, NOT a symlink.** OpenCode does not follow symlinks for skill discovery. If copying skills from another agent (e.g., Hermes), use `cp -r`, not `ln -s`.
 - **Claude Code shared path is read by both**: Skills at `~/.claude/skills/` are loaded by both Claude Code AND OpenCode. Changes here affect both platforms — be careful with platform-specific instructions.
 - **Agent mentions ≠ delegate_task**: OpenCode `@agent` dispatches subagents inline in the conversation. Hermes `delegate_task` spawns isolated subprocesses. The context isolation model is different.
 - **Trust dialogs differ**: Hermes prompts for dangerous commands; OpenCode uses permission sets in `opencode.json`. Ported skills shouldn't assume any particular approval flow.

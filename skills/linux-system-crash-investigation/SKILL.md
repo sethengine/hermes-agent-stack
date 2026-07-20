@@ -3,8 +3,10 @@ name: linux-system-crash-investigation
 description: >
   Systematic investigation of unexplained system crashes and reboots on Linux.
   Covers journalctl boot analysis, GPU/driver fault hunting (NVIDIA Xid, AMD GPU),
-  IRQ affinity debugging, kernel parameter forensics, and hardware watchdog checks.
-  Use when user reports system restarting/crashing unexpectedly.
+  IRQ affinity debugging, kernel parameter forensics, hardware watchdog checks,
+  and userspace process crash analysis from coredumpctl.
+  Use when user reports system restarting/crashing unexpectedly or a specific
+  application/process is dumping core.
 ---
 
 ## Linux System Crash & Reboot Investigation
@@ -283,3 +285,7 @@ kquitapp6 plasmashell && sleep 1 && kstart6 plasmashell &
 - **NVMe I/O scheduler udev rules:** Modern kernels removed the `queue/scheduler` file for NVMe devices (it's always `none`). Rules targeting `ATTR{queue/scheduler}` on NVMe partitions produce boot-time sysfs errors. Use `SUBSYSTEM=="nvme"` to match only the NVMe controller.
 - **BERT "Skipped 1 error records"** is almost always a firmware/BIOS quirk on Gigabyte boards. It's not actionable unless rasdaemon can decode the CPER record. Don't chase it unless there are actual system crashes.
 - **USB wakeup paths are hardware-dependent** and can change when you plug into different ports. Service files with hardcoded USB paths (e.g., `/sys/bus/usb/devices/3-7/power/wakeup`) will break if topology changes. Prefer `udev` rules with `VID/PID` matching for USB wake control.
+
+## Related References
+
+- `references/userspace-coredump-analysis.md` — Analyzing individual process crashes from coredumpctl: reading stack traces, classifying crash patterns (SIGSEGV vs SIGABRT, full vs single-frame stacks), correlating with application logs, and identifying Electron/Node.js V8 JIT crashes. Use when a specific application (zsh, Electron app, Node.js service) dumps core.
