@@ -50,8 +50,10 @@ processor.max_cstate=1 # Belt-and-suspenders for C-state limit
 usbhid.mousepoll=1     # 1ms kernel HID mouse polling
 usbhid.kbpoll=1        # 1ms kernel HID keyboard polling
 usbhid.quirks=0xVID:0xPID:0x40  # Low-latency HID path per device
-usbcore.autosuspend=-1 # Global USB never sleeps
+usbcore.autosuspend=-1 # Global USB never sleeps (or use per-device udev, see references/usb-autosuspend-udev.md)
 cpufreq.default_governor=performance
+
+**IOMMU latency note**: `intel_iommu=on` adds DMA translation overhead to GPU buffer exchanges. For gaming/low-latency workstations, consider `iommu=pt` with `igfx_off` to limit overhead. See references/iommu-latency-impact.md (or /brain query "IOMMU latency").
 pcie_aspm.policy=performance
 workqueue.power_efficient=false
 ```
@@ -60,6 +62,8 @@ workqueue.power_efficient=false
 - **Check**: `cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor`
 - **Fix**: `sudo systemctl disable --now power-profiles-daemon` (overrides governor)
 - **KDE PowerDevil**: Check `~/.config/powerdevilrc` for unexpected idle/suspend config
+
+**IRQ pinning**: USB controllers may land on E-cores. Use a systemd oneshot to pin USB IRQs to P-cores — see `references/irq-pinning-systemd.md`.
 
 ### 3. USB HID Optimization
 **hwdb 1000Hz polling** (no reboot):
@@ -448,3 +452,6 @@ See `references/` for:
 - `nvidia-wayland-env.md` — NVIDIA Wayland env vars and caveats
 - `display-color-post-sleep.md` — Display color after S3 sleep on NVIDIA Wayland
 - `libinput-flat-accel.md` — Libinput flat vs adaptive acceleration profiles
+- `usb-autosuspend-udev.md` — Per-device USB autosuspend via udev rules (alternative to GRUB global param)
+- `irq-pinning-systemd.md` — Pinning USB IRQs to P-cores via systemd oneshot service
+- `iommu-latency-impact.md` — IOMMU DMA translation overhead trade-off (in brain wiki at kernel/iommu-latency-impact.md)
