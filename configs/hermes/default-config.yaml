@@ -608,7 +608,7 @@ mcp_servers:
     - BRAVE_API_KEY
     - mcp/brave-search:latest
     env:
-      BRAVE_API_KEY: «redacted»
+      BRAVE_API_KEY: YOUR_BRAVE_API_KEY_HERE
     enabled: false
   github:
     command: docker

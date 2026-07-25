@@ -605,7 +605,7 @@ mcp_servers:
       - ghcr.io/github/github-mcp-server
     command: docker
     env:
-      GITHUB_PERSONAL_ACCESS_TOKEN: «redacted»
+      GITHUB_PERSONAL_ACCESS_TOKEN: YOUR_GITHUB_PAT_HERE
   playwright:
     args:
       - '@playwright/mcp@latest'
@@ -630,7 +630,7 @@ mcp_servers:
       - BRAVE_API_KEY
       - mcp/brave-search:latest
     env:
-      BRAVE_API_KEY: «redacted»
+      BRAVE_API_KEY: YOUR_BRAVE_API_KEY_HERE
 platform_toolsets:
   cli:
     - hermes-cli
