@@ -67,11 +67,26 @@ MODEL_NAME=qwythos-9b
 ### Search Backend
 
 Without `SEARXNG_ENDPOINT`, Firecrawl uses Google search directly. When SearXNG
-is running, set:
+is running:
 
+**Same compose file (single stack):** Use the container hostname:
+```yaml
+SEARXNG_ENDPOINT=http://searxng:8080
 ```
-SEARXNG_ENDPOINT=http://127.0.0.1:8888
+
+**Separate Docker stacks (Firecrawl + SearXNG in different compose files):**
+Use `host.docker.internal` (requires `extra_hosts` in docker-compose.yaml):
+```yaml
+SEARXNG_ENDPOINT=http://host.docker.internal:8081
 ```
+
+Verify in logs:
+```bash
+docker compose logs api | grep "Using searxng search"
+```
+
+If the search endpoint returns `SCRAPE_SITEMAP_ERROR` or sitemap 404s,
+those are normal for sites without sitemaps — the underlying search still works.
 
 ## Resource Tuning for This Machine
 
@@ -143,20 +158,32 @@ curl -X POST http://localhost:3002/v1/map \
 To make Hermes's built-in `web_search` and `web_extract` tools use the local
 Firecrawl instance instead of erroring with "Web tools are not configured":
 
-**1. config.yaml `env:` section:**
+**1. `~/.hermes/.env` file (recommended — persists across restarts):**
+```bash
+FIRECRAWL_API_URL=http://127.0.0.1:3002
+```
+
+**2. config.yaml `env:` section (Hermes-managed):**
 ```yaml
 env:
   FIRECRAWL_API_URL: http://127.0.0.1:3002
 ```
 
-**2. Shell exports (for all zsh sessions):**
+**3. `web:` section (informs the web_search tool's backend selector):**
+```yaml
+web:
+  backend: firecrawl
+  use_gateway: false
+```
+
+**4. Shell exports (for all zsh sessions — ensures os.getenv() has it):**
 ```bash
 # ~/.zshenv
 export FIRECRAWL_API_URL="http://127.0.0.1:3002"
 export FIRECRAWL_API_KEY="self-hosted-no-key-needed"
 ```
 
-**3. Restart Hermes** — env vars are loaded at process start.
+**5. Restart Hermes** — env vars are loaded at process start.
 
 **Why both?** The Firecrawl provider's `_env_value()` tries `hermes_cli.config.get_env_value()`
 first (reads config.yaml), falls back to `os.getenv()`. Having both paths set avoids

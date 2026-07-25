@@ -139,7 +139,7 @@ Net result: VAAPI is **disabled** — Video Acceleration Information is EMPTY in
 Location: `~/.config/chrome-flags.conf` (Arch wrapper reads this automatically)
 
 **Working config for NVIDIA + Wayland (Video + GPU acceleration):**
-```\n--ozone-platform=wayland\n--use-gl=angle\n--ignore-gpu-blocklist\n--enable-gpu-rasterization\n--enable-native-gpu-memory-buffers\n--enable-features=VaapiOnNvidiaGPUs,VaapiIgnoreDriverChecks,AcceleratedVideoDecodeLinuxGL,UseMultiPlaneFormatForHardwareVideo\n```\n\nFlag breakdown:\n\n| Flag | Purpose |\n|------|---------|\n| `--use-gl=angle` | REQUIRED — only working GL path on NVIDIA+Wayland |\n| `--ignore-gpu-blocklist` | Enables GPU despite Chrome's blocklist |\n| `--enable-gpu-rasterization` | GPU raster for page rendering |\n| `--enable-native-gpu-memory-buffers` | Needed for zero-copy video decode |\n| `VaapiOnNvidiaGPUs` | **Key flag** — enables VAAPI on NVIDIA GPUs on Chrome 149+ |\n| `VaapiIgnoreDriverChecks` | Bypasses Chrome's `Should skip nVidia device` check in vaapi_wrapper.cc |\n| `AcceleratedVideoDecodeLinuxGL` | VAAPI decode path via GL |\n| `UseMultiPlaneFormatForHardwareVideo` | Keeps YUV as multi-plane textures (better quality) |\n\n**Note on `AcceleratedVideoDecodeLinuxZeroCopyGL`:** This flag is deliberately NOT in the recommended config. On NVIDIA Wayland, zero-copy VA-API decode causes YouTube A/V desync (see the dedicated pitfall section below). Only add it if you need the performance gain and can tolerate the sync issue.
+```\n--ozone-platform=wayland\n--use-gl=angle\n--ignore-gpu-blocklist\n--enable-gpu-rasterization\n--enable-native-gpu-memory-buffers\n--enable-features=VaapiOnNvidiaGPUs,VaapiIgnoreDriverChecks,AcceleratedVideoDecodeLinuxGL,UseMultiPlaneFormatForHardwareVideo\n```\n\nFlag breakdown:\n\n| Flag | Purpose |\n|------|---------|\n| `--use-gl=angle` | REQUIRED — only working GL path on NVIDIA+Wayland |\n| `--ignore-gpu-blocklist` | Enables GPU despite Chrome's blocklist |\n| `--enable-gpu-rasterization` | GPU raster for page rendering |\n| `--enable-native-gpu-memory-buffers` | **Do NOT use** on NVIDIA Wayland — causes rendering corruption. Remove from chrome-flags.conf. |\n| `VaapiOnNvidiaGPUs` | **Key flag** — enables VAAPI on NVIDIA GPUs on Chrome 149+ |\n| `VaapiIgnoreDriverChecks` | Bypasses Chrome's `Should skip nVidia device` check in vaapi_wrapper.cc |\n| `AcceleratedVideoDecodeLinuxGL` | VAAPI decode path via GL |\n| `UseMultiPlaneFormatForHardwareVideo` | Keeps YUV as multi-plane textures (better quality) |\n\n**Note on `AcceleratedVideoDecodeLinuxZeroCopyGL`:** This flag is deliberately NOT in the recommended config. On NVIDIA Wayland, zero-copy VA-API decode causes YouTube A/V desync (see the dedicated pitfall section below). Only add it if you need the performance gain and can tolerate the sync issue.
 
 ### Enabling VAAPI video decode on NVIDIA
 
@@ -673,6 +673,45 @@ journalctl --user -u xdg-desktop-portal --no-hostname -n 3 2>/dev/null
 ls /usr/share/xdg-desktop-portal/portals/*.portal 2>/dev/null
 ```
 
+## SDDM Login Loop — simpledrm Grabs DRM Minor 0 Before nvidia-drm
+
+### Symptom
+
+Kernel boots to SDDM, but entering credentials → screen flash → back to SDDM. Infinite loop. kwin_wayland crashes at session start because it opens `/dev/dri/card0` expecting the NVIDIA GPU but finds a simpledrm framebuffer device.
+
+Common scenario: a custom kernel (CachyOS, Xanmod, self-built) behaves differently from the stock distro kernel despite identical initramfs, modprobe config, and kernel cmdline.
+
+### Root Cause
+
+simpledrm (built-in, `=y` in kernel config) creates a DRM device on minor 0 **before** nvidia-drm loads. nvidia-drm gets pushed to minor 1 → `/dev/dri/card1`. kwin_wayland opens card0 → gets the wrong device → crashes.
+
+The kernel cmdline `nvidia_drm.modeset=1` normally suppresses simpledrm probing, but on custom kernels the suppression may fail due to different compiler optimization (O3 vs O2), scheduler patches (BORE, CACHY), or microarchitecture target changing initcall ordering. The kernel configs themselves are nearly identical — the difference is in the toolchain, not the `.config`.
+
+### Diagnostic
+
+```bash
+# Compare DRM init across recent boots
+for b in 0 1 2 3 4; do echo "=== Boot -$b ==="; journalctl -k -b -$b --no-pager 2>/dev/null | grep -E 'simpledrm|nvidia-drm.*minor'; done
+
+# Check current DRM device → GPU mapping
+for c in /sys/class/drm/card*; do echo "$c -> $(cat $c/device/vendor 2>/dev/null):$(cat $c/device/device 2>/dev/null)"; done
+```
+
+The working boot shows `nvidia-drm on minor 0` without prior simpledrm init.  
+The broken boot shows `Initialized simpledrm ... on minor 0` then `nvidia-drm on minor 1`.
+
+Also check `/proc/fb` — if it shows `simpledrmdrmfb` rather than just `EFI VGA`, simpledrm is active.
+
+### Fix Options
+
+- **`sysfb.disable=1`** in kernel cmdline — prevents the framebuffer platform device from being registered, so simpledrm has nothing to bind to
+- **`simpledrm.remove=1`** in kernel cmdline — unregisters simpledrm driver entirely
+- Remove `nvidia_drm.fbdev=0` from modprobe.d — lets nvidia-drm provide fbdev, which can change init ordering
+
+### Reference
+
+Full investigation transcript and diagnostic commands in `references/sddm-login-loop-drm-minor.md`.
+
 ## sched-ext / scx_loader Config Pitfalls
 
 ### The "gaming" vs "Gaming" Typo
@@ -695,11 +734,61 @@ sudo sed -i 's/"gaming"/"Gaming"/' /usr/share/scx_loader/config.toml
 ### Finding the Config File
 
 scx_loader looks for config in this order:
-1. `/etc/scx_loader.toml`
-2. `~/.config/scx_loader.toml`
-3. `/usr/share/scx_loader/config.toml` (package default)
+1. `/etc/scx_loader/config.toml` ⚠️ **takes highest priority** — if this exists, it overrides the package default
+2. `/etc/scx_loader.toml`
+3. `~/.config/scx_loader.toml`
+4. `/usr/share/scx_loader/config.toml` (package default — lowest priority)
 
-On Arch/Manjaro, the default is `/usr/share/scx_loader/config.toml`. Do NOT create `/etc/scx_loader.toml` unless you need to override the defaults — the package default already sets sane defaults.
+**The /etc/scx_loader/ directory is the most common trap.** If you edit `/usr/share/scx_loader/config.toml` (the package default) but `/etc/scx_loader/config.toml` also exists, your changes are silently ignored. Always check both:
+
+```bash
+ls /etc/scx_loader/ /usr/share/scx_loader/
+cat /etc/scx_loader/config.toml /usr/share/scx_loader/config.toml
+```
+
+On Arch/Manjaro, the package default is at `/usr/share/scx_loader/config.toml`. The `/etc/scx_loader/` directory is only created if you (or another tool like GameMode integration) explicitly creates it. If it exists, edit that one — not the one in /usr/share/.
+
+### scx Scheduler Modes
+
+The scx_loader config (`/usr/share/scx_loader/config.toml`) supports these modes for scx_rustland:
+
+| Mode | Slice | Behavior |
+|------|-------|----------|
+| `Auto` | Dynamic | Let scx_loader choose based on system state |
+| `Gaming` | 20ms | Prioritizes interactive tasks on P-cores, stable slices for GPU submission — best for gaming + desktop mix |
+| `LowLatency` | Smaller | More frequent preemption, higher overhead — diminishing returns on already-tuned kernels |
+| `PowerSave` | Larger | Groups tasks for longer idle periods |
+| `Server` | Larger | Throughput-oriented |
+
+**bpfland vs rustland:** `scx_bpfland` is single-purpose (always balanced mode). `scx_rustland` supports the modes above. bpfland has lower overhead; rustland is more flexible.
+
+Switch default scheduler:
+```bash
+sudo sed -i 's/scx_bpfland/scx_rustland/' /usr/share/scx_loader/config.toml
+```
+
+### GameMode Overrides scx Scheduler
+
+**Critical trap:** GameMode's `[custom]` section runs shell commands when games start and stop. If the GameMode config has:
+
+```ini
+[custom]
+start=scxctl switch -s lavd       # or any scheduler name
+stop=scxctl switch -s rusty       # ← This re-loads rusty on EVERY game exit!
+```
+
+Then **every time a game exits**, GameMode runs `scxctl switch -s rusty`, which overrides whatever your scx_loader config says. The loader config becomes irrelevant — rusty is always forced back.
+
+**Check both system and user GameMode configs:**
+```bash
+grep -A2 "\[custom\]" /etc/gamemode.ini ~/.config/gamemode.ini 2>/dev/null
+```
+
+**Fix — change to bpfland or remove the lines:**
+```bash
+sudo sed -i 's/switch -s rusty/switch -s bpfland/g' /etc/gamemode.ini
+sed -i 's/switch -s rusty/switch -s bpfland/g' ~/.config/gamemode.ini
+```
 
 ### When scx_rustland Makes Sense
 
@@ -1004,7 +1093,24 @@ grep "nvidia\\|xhci" /proc/interrupts | awk '{print $1, $9, $10, $11, $12, $13}'
 
 #### NVMe Driver Overrides IRQ Affinity
 
-The NVMe driver does not persistently respect `/proc/irq/*/smp_affinity` writes. After the script sets an NVMe queue's affinity, the driver may reassign it on the next I/O operation. This is a driver-internal MSI-X rebalance, not a script bug.
+The NVMe driver does not persistently respect `/proc/irq/*/smp_affinity` writes, and WiFi (iwlwifi) queue IRQs have the same behavior. After the script sets affinity, the driver reassigns them. This also affects WiFi (iwlwifi) — queue IRQs drift back onto P-cores.
+
+**Mitigation:** Add straggler catch loops after pinning:
+```bash
+# NVMe stragglers
+for irq in $(grep "nvme" /proc/interrupts | awk '{print $1}' | tr -d ':'); do
+  cur=$(cat /proc/irq/$irq/smp_affinity 2>/dev/null)
+  [ -n "$cur" ] && [ "$((16#${cur} & 0x3F00))" -ne 0 ] 2>/dev/null &&
+    echo "fc000" > /proc/irq/$irq/smp_affinity 2>/dev/null
+done
+# WiFi stragglers  
+for irq in $(grep "iwlwifi" /proc/interrupts | awk '{print $1}' | tr -d ':'); do
+  cur=$(cat /proc/irq/$irq/smp_affinity 2>/dev/null)
+  [ -n "$cur" ] && [ "$((16#${cur} & 0xFF))" -ne 0 ] 2>/dev/null &&
+    echo "fc000" > /proc/irq/$irq/smp_affinity 2>/dev/null
+done
+```
+Run the script every 30-120s via timer to keep stragglers under 5% volume.
 
 The straggler catch (Step 5 in the v4 template) re-detects and re-fixes these on every timer tick. Straggler queues typically carry <5% of interrupt volume on GPU/USB cores, so the impact between fixups is negligible.
 
@@ -1013,6 +1119,25 @@ The straggler catch (Step 5 in the v4 template) re-detects and re-fixes these on
 - Only affects NVMe MSI-X queues; GPU and xHCI IRQs stay pinned correctly
 
 #### EPP Locked by Performance Governor
+
+### EPP Locked by Performance Governor
+
+With `cpufreq.default_governor=performance` in kernel cmdline + `intel_pstate=active`, the `energy_performance_preference` sysfs file is locked by the kernel at boot:
+```
+/sys/devices/system/cpu/cpu8/cpufreq/energy_performance_preference: Device or resource busy
+```
+Writing to it (via `echo` or `cpupower -c N set --epp performance`) fails with `EBUSY` even as root. The Intel P-State driver in active mode + performance governor takes exclusive control of the EPP register. The file shows `"default"` as a placeholder — the hardware is managing it internally.
+
+**Workaround:** Temporarily switch governor away from `performance`, set EPP, switch back:
+```bash
+echo "powersave" > /sys/devices/system/cpu/cpu8/cpufreq/scaling_governor
+echo "performance" > /sys/devices/system/cpu/cpu8/cpufreq/energy_performance_preference
+echo "performance" > /sys/devices/system/cpu/cpu8/cpufreq/scaling_governor
+```
+
+Cosmetic — no actionable impact.
+
+### EPP Locked by Performance Governor
 
 With `cpufreq.default_governor=performance` in kernel cmdline + `intel_pstate=active`, the `energy_performance_preference` sysfs file is locked by the kernel at boot:
 
@@ -1028,7 +1153,29 @@ Writing to it (via `echo` or `cpupower -c N set --epp performance`) fails with `
 
 This only applies to **hybrid CPU architectures** (Intel Core Ultra P/E-core, or soon AMD hybrid). On a traditional CPU where all cores are equivalent, IRQ pinning to any core works fine and this section doesn't apply.
 
-## Input Latency Debugging
+### kernel.timer_migration — Timer Jitter on Isolated Cores
+
+Controls whether kernel timers can migrate from their originating core. When `1` (default), a timer created on core A can fire on core B. With `nohz_full=0-7`, this lets timers bounce onto isolated P-cores and adds latency jitter.
+
+**Fix:**
+```bash
+echo "kernel.timer_migration=0" | sudo tee /etc/sysctl.d/99-latency.conf
+sudo sysctl -w kernel.timer_migration=0
+```
+
+### watchdog_cpumask — Watchdog Defeats nohz_full
+
+The soft lockup watchdog creates periodic timer interrupts. If `watchdog_cpumask=0-19` (all cores) while `nohz_full=0-7` isolates P-cores, the watchdog fires on isolated cores and defeats the purpose. Fix by adding to kernel cmdline:
+```
+nohz_full=0-7 watchdog_cpumask=8-19
+```
+
+Check current:
+```bash
+cat /proc/sys/kernel/watchdog_cpumask
+```
+
+### Input Latency Debugging
 
 ### Background GPU Hog Detection
 
@@ -1577,6 +1724,7 @@ DXVK (DX9-11) and VKD3D-Proton (DX12) use different HDR env vars. Check which re
 
 | File | Type | Purpose |
 |------|------|---------|
+| `references/sddm-login-loop-drm-minor.md` | Reference | simpledrm grabbing DRM minor 0 before nvidia-drm — SDDM login loop, diagnostic commands, kernel config comparison, and fix options |
 | `references/nvidia-drm-syncobj-fd-leak.md` | Reference | nvidia-open DRM syncobj FD leak causing plasmashell crash — diagnostic, quick fix, permanent fix |
 | `references/chrome-gpu-research.md` | Reference | Research notes on Chrome GPU + NVIDIA Wayland |
 | `references/powerdevil-dpms-failure.md` | Reference | DPMS display wake failure analysis |

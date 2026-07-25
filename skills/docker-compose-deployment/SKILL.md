@@ -66,6 +66,58 @@ Common failure modes:
 | `pg_cron` extension fails | Requires `POSTGRES_DB=postgres` (not custom name). Set in `.env`. |
 | Warnings about bypassing auth | Normal for self-hosted without Supabase. Ignore. |
 
+## Persistence: restart Policies
+
+Without explicit config, Docker Compose services **do not restart** after a system
+reboot. All containers show `Exited (0) N hours ago`.
+
+**Fix:** Add `restart: unless-stopped` to every service in `docker-compose.yaml`:
+
+```yaml
+services:
+  api:
+    restart: unless-stopped       # ← add to each service
+    environment: ...
+```
+
+Best applied via the YAML anchor when one exists:
+
+```yaml
+x-common-service: &common-service
+  image: ...
+  restart: unless-stopped
+```
+
+Then apply:
+```bash
+docker compose down && docker compose up -d
+```
+
+Reboot to verify. All containers should come back with `Up N hours` instead of `Exited`.
+
+## Cross-Container Networking
+
+When two services run in **separate Docker Compose stacks** (different compose
+files), they're on different bridge networks and cannot resolve each other by
+service name. From container A, reach a service running on the Docker host or
+in another stack via `host.docker.internal`:
+
+```yaml
+# .env for container A
+SOME_ENDPOINT=http://host.docker.internal:8081
+```
+
+This requires `extra_hosts` in container A's compose file:
+
+```yaml
+extra_hosts:
+  - "host.docker.internal:host-gateway"
+```
+
+The `host-gateway` magic resolves to the Docker host's loopback. Works on
+Linux with Docker ≥ 20.10. The `host.docker.internal` hostname is only
+available **inside** containers, never from the host itself.
+
 ## Management Script
 
 Create `bin/<service>-ctl.sh` with `{up,down,restart,status,logs}`:
