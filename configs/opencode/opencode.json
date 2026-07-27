@@ -1,294 +1,319 @@
 {
-  "$schema": "https://opencode.ai/config.json",
-  "plugin": ["opencode-agent-memory"],
-  "provider": {
-    "llama.cpp": {
-      "npm": "@ai-sdk/openai-compatible",
-      "name": "llama-server (local)",
-      "options": {
-        "baseURL": "http://127.0.0.1:8030/v1"
-      },
-      "models": {
-        "microsoft_Fara-7B-Q8_0": {
-          "name": "microsoft_Fara-7B-Q8_0(local)",
-          "limit": {
-            "context": 1600,
-            "output": 65536
-          }
+    "$schema": "https://opencode.ai/config.json",
+    "plugin": [
+        "opencode-agent-memory"
+    ],
+    "provider": {
+        "llama.cpp": {
+            "npm": "@ai-sdk/openai-compatible",
+            "name": "llama-server (local)",
+            "options": {
+                "baseURL": "http://127.0.0.1:8030/v1"
+            },
+            "models": {
+                "microsoft_Fara-7B-Q8_0": {
+                    "name": "microsoft_Fara-7B-Q8_0(local)",
+                    "limit": {
+                        "context": 1600,
+                        "output": 65536
+                    }
+                },
+                "gemma-4": {
+                    "name": "gemma-4-26B-A4B-it-MXFP4_MOE_BF16"
+                },
+                "nvidia_NVIDIA-Nemotron-Nano-12B-v2": {
+                    "name": "nvidia_NVIDIA-Nemotron-Nano-12B-v2(local)",
+                    "limit": {
+                        "context": 128000,
+                        "output": 65536
+                    }
+                }
+            }
         },
-        "gemma-4": {
-          "name": "gemma-4-26B-A4B-it-MXFP4_MOE_BF16"
-        },
-        "nvidia_NVIDIA-Nemotron-Nano-12B-v2": {
-          "name": "nvidia_NVIDIA-Nemotron-Nano-12B-v2(local)",
-          "limit": {
-            "context": 128000,
-            "output": 65536
-          }
+        "lm.studio": {
+            "npm": "@ai-sdk/openai-compatible",
+            "name": "llama-studio (local)",
+            "options": {
+                "baseURL": "http://127.0.0.1:8060/v1"
+            },
+            "models": {
+                "gemma": {
+                    "name": "gemma-3-12b-it-qat",
+                    "limit": {
+                        "context": 1600,
+                        "output": 65536
+                    }
+                },
+                "gemma-4": {
+                    "name": "gemma-4-26B-A4B-it-MXFP4_MOE_BF16",
+                    "limit": {
+                        "context": 65536,
+                        "output": 65536
+                    }
+                },
+                "nvidia_NVIDIA-Nemotron-Nano-12B-v2": {
+                    "name": "nvidia_NVIDIA-Nemotron-Nano-12B-v2(local)",
+                    "limit": {
+                        "context": 128000,
+                        "output": 65536
+                    }
+                }
+            }
         }
-      }
     },
-    "lm.studio": {
-      "npm": "@ai-sdk/openai-compatible",
-      "name": "llama-studio (local)",
-      "options": {
-        "baseURL": "http://127.0.0.1:8060/v1"
-      },
-      "models": {
-        "gemma": {
-          "name": "gemma-3-12b-it-qat",
-          "limit": {
-            "context": 1600,
-            "output": 65536
-          }
+    "mcp": {
+        "searxng": {
+            "type": "local",
+            "command": [
+                "python3.14",
+                "/home/sethengine/.local/bin/mcp-bridge"
+            ],
+            "enabled": true
         },
-        "gemma-4": {
-          "name": "gemma-4-26B-A4B-it-MXFP4_MOE_BF16",
-          "limit": {
-            "context": 65536,
-            "output": 65536
-          }
+        "playwright": {
+            "type": "local",
+            "command": [
+                "npx",
+                "@playwright/mcp@latest"
+            ],
+            "enabled": true
         },
-        "nvidia_NVIDIA-Nemotron-Nano-12B-v2": {
-          "name": "nvidia_NVIDIA-Nemotron-Nano-12B-v2(local)",
-          "limit": {
-            "context": 128000,
-            "output": 65536
-          }
+        "brave-search": {
+            "type": "local",
+            "command": [
+                "docker",
+                "run",
+                "-i",
+                "--rm",
+                "-e",
+                "BRAVE_API_KEY",
+                "mcp/brave-search:latest"
+            ],
+            "enabled": false,
+            "environment": {
+                "BRAVE_API_KEY": "YOUR_BRAVE_API_KEY_HERE"
+            }
+        },
+        "youtube-transcript": {
+            "type": "local",
+            "command": [
+                "docker",
+                "run",
+                "-i",
+                "--rm",
+                "mcp/youtube-transcript"
+            ],
+            "enabled": true
+        },
+        "context7": {
+            "type": "remote",
+            "url": "http://localhost:8031/sse",
+            "enabled": true
+        },
+        "github": {
+            "type": "local",
+            "command": [
+                "docker",
+                "run",
+                "-i",
+                "--rm",
+                "-e",
+                "GITHUB_PERSONAL_ACCESS_TOKEN",
+                "--add-host=host.docker.internal:host-gateway",
+                "ghcr.io/github/github-mcp-server"
+            ],
+            "enabled": true,
+            "environment": {
+                "GITHUB_PERSONAL_ACCESS_TOKEN": "«redacted»"
+            }
+        },
+        "c4ai": {
+            "type": "remote",
+            "url": "http://localhost:11235/mcp/sse",
+            "enabled": true
+        },
+        "crawl": {
+            "type": "remote",
+            "url": "http://localhost:11235/mcp/ws",
+            "enabled": true
+        },
+        "firecrawl": {
+            "type": "local",
+            "command": [
+                "npx",
+                "-y",
+                "firecrawl-mcp"
+            ],
+            "enabled": true,
+            "environment": {
+                "FIRECRAWL_API_URL": "http://localhost:3002"
+            }
+        },
+        "codebase-memory-mcp": {
+            "enabled": true,
+            "type": "local",
+            "command": [
+                "/home/sethengine/.local/bin/codebase-memory-mcp"
+            ]
         }
-      }
-    }
-  },
-  "mcp": {
-    "searxng": {
-      "type": "local",
-      "command": ["python3.14", "/home/sethengine/.local/bin/mcp-bridge"],
-      "enabled": true
     },
-    "playwright": {
-      "type": "local",
-      "command": ["npx", "@playwright/mcp@latest"],
-      "enabled": true
-    },
-    "brave-search": {
-      "type": "local",
-      "command": [
-        "docker",
-        "run",
-        "-i",
-        "--rm",
-        "-e",
-        "BRAVE_API_KEY",
-        "mcp/brave-search:latest"
-      ],
-      "enabled": false,
-      "environment": {
-        "BRAVE_API_KEY": "YOUR_BRAVE_API_KEY_HERE"
-      }
-    },
-    "youtube-transcript": {
-      "type": "local",
-      "command": ["docker", "run", "-i", "--rm", "mcp/youtube-transcript"],
-      "enabled": true
-    },
-    "context7": {
-      "type": "remote",
-      "url": "http://localhost:8031/sse",
-      "enabled": true
-    },
-    "github": {
-      "type": "local",
-      "command": [
-        "docker",
-        "run",
-        "-i",
-        "--rm",
-        "-e",
-        "GITHUB_PERSONAL_ACCESS_TOKEN",
-        "--add-host=host.docker.internal:host-gateway",
-        "ghcr.io/github/github-mcp-server"
-      ],
-      "enabled": true,
-      "environment": {
-        "GITHUB_PERSONAL_ACCESS_TOKEN": "«redacted»"
-      }
-    },
-    "c4ai": {
-      "type": "remote",
-      "url": "http://localhost:11235/mcp/sse",
-      "enabled": true
-    },
-    "crawl": {
-      "type": "remote",
-      "url": "http://localhost:11235/mcp/ws",
-      "enabled": true
-    },
-    "firecrawl": {
-      "type": "local",
-      "command": ["npx", "-y", "firecrawl-mcp"],
-      "enabled": true,
-      "environment": {
-        "FIRECRAWL_API_URL": "http://localhost:3002"
-      }
-    }
-  },
-  "tools": {
-    "searxng": true,
-    "context7": true,
-    "brave-search": true,
-    "youtube-transcript": true,
-    "firecrawl": true
-  },
-  "agent": {
-    "build": {
-      "tools": {
-        "searxng": true,
-        "context7": true,
-        "youtube-transcript": true
-      },
-      "options": {},
-      "permission": {
-        "searxng": "allow",
-        "context7": "allow",
-        "youtube-transcript": "allow"
-      }
-    },
-    "plan": {
-      "tools": {
-        "searxng": true,
-        "context7": true,
-        "youtube-transcript": true
-      },
-      "options": {},
-      "permission": {
-        "searxng": "allow",
-        "context7": "allow",
-        "youtube-transcript": "allow"
-      }
-    },
-    "general": {
-      "tools": {
-        "searxng": true,
-        "context7": true,
-        "youtube-transcript": true,
-        "firecrawl": true
-      },
-      "mode": "primary",
-      "options": {},
-      "permission": {
-        "searxng": "allow",
-        "context7": "allow",
-        "youtube-transcript": "allow",
-        "firecrawl": "allow"
-      }
-    },
-    "research": {
-      "prompt": "{file:./prompt-research.md}",
-      "temperature": 0.4,
-      "description": "Internet research agent: search, browse, cross-verify, synthesize findings with source citations. Asks clarifying questions and offers next-step options.",
-      "tools": {
+    "tools": {
         "searxng": true,
         "context7": true,
         "brave-search": true,
         "youtube-transcript": true,
-        "crawl": true,
-        "c4ai": true,
-        "playwright": true,
-        "github": true,
         "firecrawl": true
-      },
-      "mode": "all",
-      "options": {},
-      "permission": {
-        "searxng": "allow",
-        "context7": "allow",
-        "brave-search": "allow",
-        "youtube-transcript": "allow",
-        "crawl": "allow",
-        "c4ai": "allow",
-        "playwright": "allow",
-        "github": "allow",
-        "firecrawl": "allow"
-      }
     },
-    "simple": {
-      "tools": {
-        "searxng": true,
-        "context7": false,
-        "brave-search": false,
-        "youtube-transcript": false,
-        "crawl": false,
-        "c4ai": false,
-        "playwright": false,
-        "github": false
-      },
-      "mode": "all",
-      "options": {},
-      "permission": {
-        "searxng": "allow",
-        "context7": "deny",
-        "brave-search": "deny",
-        "youtube-transcript": "deny",
-        "crawl": "deny",
-        "c4ai": "deny",
-        "playwright": "deny",
-        "github": "deny"
-      }
+    "agent": {
+        "build": {
+            "tools": {
+                "searxng": true,
+                "context7": true,
+                "youtube-transcript": true
+            },
+            "options": {},
+            "permission": {
+                "searxng": "allow",
+                "context7": "allow",
+                "youtube-transcript": "allow"
+            }
+        },
+        "plan": {
+            "tools": {
+                "searxng": true,
+                "context7": true,
+                "youtube-transcript": true
+            },
+            "options": {},
+            "permission": {
+                "searxng": "allow",
+                "context7": "allow",
+                "youtube-transcript": "allow"
+            }
+        },
+        "general": {
+            "tools": {
+                "searxng": true,
+                "context7": true,
+                "youtube-transcript": true,
+                "firecrawl": true
+            },
+            "mode": "primary",
+            "options": {},
+            "permission": {
+                "searxng": "allow",
+                "context7": "allow",
+                "youtube-transcript": "allow",
+                "firecrawl": "allow"
+            }
+        },
+        "research": {
+            "prompt": "{file:./prompt-research.md}",
+            "temperature": 0.4,
+            "description": "Internet research agent: search, browse, cross-verify, synthesize findings with source citations. Asks clarifying questions and offers next-step options.",
+            "tools": {
+                "searxng": true,
+                "context7": true,
+                "brave-search": true,
+                "youtube-transcript": true,
+                "crawl": true,
+                "c4ai": true,
+                "playwright": true,
+                "github": true,
+                "firecrawl": true
+            },
+            "mode": "all",
+            "options": {},
+            "permission": {
+                "searxng": "allow",
+                "context7": "allow",
+                "brave-search": "allow",
+                "youtube-transcript": "allow",
+                "crawl": "allow",
+                "c4ai": "allow",
+                "playwright": "allow",
+                "github": "allow",
+                "firecrawl": "allow"
+            }
+        },
+        "simple": {
+            "tools": {
+                "searxng": true,
+                "context7": false,
+                "brave-search": false,
+                "youtube-transcript": false,
+                "crawl": false,
+                "c4ai": false,
+                "playwright": false,
+                "github": false
+            },
+            "mode": "all",
+            "options": {},
+            "permission": {
+                "searxng": "allow",
+                "context7": "deny",
+                "brave-search": "deny",
+                "youtube-transcript": "deny",
+                "crawl": "deny",
+                "c4ai": "deny",
+                "playwright": "deny",
+                "github": "deny"
+            }
+        },
+        "power": {
+            "prompt": "{file:./prompt.md}",
+            "temperature": 0.3,
+            "tools": {
+                "searxng": true,
+                "context7": true,
+                "brave-search": true,
+                "youtube-transcript": true,
+                "crawl": true,
+                "c4ai": true,
+                "playwright": true,
+                "github": true,
+                "firecrawl": true
+            },
+            "mode": "all",
+            "options": {},
+            "permission": {
+                "searxng": "allow",
+                "context7": "allow",
+                "brave-search": "allow",
+                "youtube-transcript": "allow",
+                "crawl": "allow",
+                "c4ai": "allow",
+                "playwright": "allow",
+                "github": "allow",
+                "firecrawl": "allow"
+            }
+        },
+        "self-review": {
+            "prompt": "You are a post-task self-improvement review agent. Your job: review the preceding conversation and save durable lessons using memory and skill tools. Be ACTIVE \u2014 most sessions produce at least one update. Memory captures who the user is and what the environment is. Skills capture how to do a class of task. User corrections are first-class signals for both. Never save session artifacts (PR numbers, task progress, transient errors). If nothing worth saving, say 'Nothing to save.'",
+            "temperature": 0.3,
+            "tools": {
+                "searxng": false,
+                "context7": false,
+                "brave-search": false,
+                "youtube-transcript": false,
+                "crawl": false,
+                "c4ai": false,
+                "playwright": false,
+                "github": false
+            },
+            "mode": "subagent",
+            "options": {},
+            "permission": {
+                "searxng": "deny",
+                "context7": "deny",
+                "brave-search": "deny",
+                "youtube-transcript": "deny",
+                "crawl": "deny",
+                "c4ai": "deny",
+                "playwright": "deny",
+                "github": "deny"
+            }
+        }
     },
-    "power": {
-      "prompt": "{file:./prompt.md}",
-      "temperature": 0.3,
-      "tools": {
-        "searxng": true,
-        "context7": true,
-        "brave-search": true,
-        "youtube-transcript": true,
-        "crawl": true,
-        "c4ai": true,
-        "playwright": true,
-        "github": true,
-        "firecrawl": true
-      },
-      "mode": "all",
-      "options": {},
-      "permission": {
-        "searxng": "allow",
-        "context7": "allow",
-        "brave-search": "allow",
-        "youtube-transcript": "allow",
-        "crawl": "allow",
-        "c4ai": "allow",
-        "playwright": "allow",
-        "github": "allow",
-        "firecrawl": "allow"
-      }
-    },
-    "self-review": {
-      "prompt": "You are a post-task self-improvement review agent. Your job: review the preceding conversation and save durable lessons using memory and skill tools. Be ACTIVE — most sessions produce at least one update. Memory captures who the user is and what the environment is. Skills capture how to do a class of task. User corrections are first-class signals for both. Never save session artifacts (PR numbers, task progress, transient errors). If nothing worth saving, say 'Nothing to save.'",
-      "temperature": 0.3,
-      "tools": {
-        "searxng": false,
-        "context7": false,
-        "brave-search": false,
-        "youtube-transcript": false,
-        "crawl": false,
-        "c4ai": false,
-        "playwright": false,
-        "github": false
-      },
-      "mode": "subagent",
-      "options": {},
-      "permission": {
-        "searxng": "deny",
-        "context7": "deny",
-        "brave-search": "deny",
-        "youtube-transcript": "deny",
-        "crawl": "deny",
-        "c4ai": "deny",
-        "playwright": "deny",
-        "github": "deny"
-      }
-    }
-  },
-  "shell": "/usr/bin/zsh"
+    "shell": "/usr/bin/zsh"
 }

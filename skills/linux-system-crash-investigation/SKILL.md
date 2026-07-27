@@ -104,7 +104,43 @@ Reconstruct the exact sequence:
 4. Was there an intervening event (scxctl, sudo, service start)?
 5. What changed in the kernel cmdline between the crash boot and the next boot?
 
-### Phase 7: sched_ext / scx_rustland Crash Investigation
+### Phase 0: Frame the Problem in Functional Terms
+
+Before diving into technical investigation, state the finding in terms of the USER experience, not the technical artifact.
+
+Bad: "The Node.js utility process crashes with SIGABRT."
+Good: "The app doesn't respond to prompts because the LLM backend service keeps dying."
+
+The crash mechanism explains WHY. The functional impact is WHAT matters to the user. Always lead with the what, then explain the why.
+
+This applies to every investigation finding you report. coredump artifacts, stack traces, and signal codes are evidence — not the problem statement. Translate them.
+
+### Phase 7: Application Config & Plugin Analysis (Userspace Crashes)
+
+When a userspace app (especially Electron/Node.js) crashes with SIGABRT + SI_TKILL, the root cause is often a misconfigured plugin/extension path rather than the app itself:
+
+```bash
+# 1. Check stored error notifications in app data files
+strings ~/.config/<app>/*.dat 2>/dev/null | grep -iE "error|fail|Cannot find module|Failed to load plugin"
+
+# 2. Check app's config directory for third-party plugin configs
+cat ~/.config/<app>/.opencode/opencode.json 2>/dev/null | head -30
+cat ~/.opencode/opencode.json 2>/dev/null | head -30
+
+# 3. Timeline comparison — crash frequency before vs after config change
+ls -lt ~/.config/<app>/logs/ | head -10
+for d in ~/.config/<app>/logs/*/; do
+  echo "$(basename $d): $(cat "$d/utility.log" 2>/dev/null || echo 'no utility.log')"
+done
+
+# 4. Check if plugin/skill paths point to compiled JS vs TS source
+ls <plugin-dir>/*.js 2>/dev/null  # compiled JS
+ls <plugin-dir>/*.ts 2>/dev/null  # TS source (may cause resolution errors)
+```
+
+See `references/userspace-coredump-analysis.md` for the full case study with the OpenCode + ECC plugin path mismatch.
+
+### Phase 8: sched_ext / scx_rustland Crash Investigation
 
 ```bash
 # Check if scx scheduler is active
@@ -123,7 +159,7 @@ cat /sys/devices/system/cpu/cpu*/topology/cluster_id 2>/dev/null | sort -u
 cat /sys/devices/system/cpu/cpu0/cache/index3/shared_cpu_list
 ```
 
-### Phase 8: BERT (Boot Error Record Table) Investigation
+### Phase 9: BERT (Boot Error Record Table) Investigation
 
 ```bash
 # Check if BERT error exists
@@ -149,7 +185,7 @@ zgrep 'CONFIG_ACPI_APEI' /proc/config.gz 2>/dev/null || grep 'CONFIG_ACPI_APEI' 
 
 **BERT "Skipped" meaning:** The kernel's APEI driver found a CPER (Common Platform Error Record) in the BERT table but couldn't decode it. This is often a firmware bug where the BIOS writes records in a format the kernel doesn't understand. Common on Gigabyte/ASUS AMI BIOS boards. Usually harmless.
 
-### Phase 9: DMAR/IOMMU Fault Investigation (NVIDIA GPU Audio)
+### Phase 10: DMAR/IOMMU Fault Investigation (NVIDIA GPU Audio)
 
 DMAR fault storms from the NVIDIA GPU's HDMI audio function (`02:00.1`) can cause a **full system crash cascade** — not just resume failures. This is a distinct crash mechanism from GPU compute/driver Xid errors.
 

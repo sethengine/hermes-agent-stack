@@ -7,7 +7,10 @@ A systematic methodology for analyzing individual process crashes logged by `cor
 | Signal | Name | Meaning | Typical Cause |
 |--------|------|---------|---------------|
 | 6 | SIGABRT | Process aborted itself | Assertion failure, OOM abort, `process.abort()`, V8 fatal error |
+| 6 + SI_TKILL | SIGABRT (self-inflicted) | Process intentionally killed itself via `raise()`/`tgkill()` | Unhandled Node.js/V8 exception, assertion check failure — process detected a runtime error condition and self-terminated |
 | 11 | SEGV | Segmentation fault | Use-after-free, NULL deref, buffer overflow, corrupted pointer |
+
+**Key distinction:** `si_code: SI_TKILL` means the process sent the signal to itself. This is different from an external signal (SI_USER) or a hardware fault (SEGV_MAPERR). SIGABRT + SI_TKILL means the runtime detected an unrecoverable condition and called `abort()`. Very common in Node.js/V8 when an unhandled exception propagates to the top level of the event loop, or when a native C++ assertion fails in an addon.
 
 ## Investigation Pipeline
 
@@ -97,16 +100,63 @@ Check the relevant process log (`utility.log` for NodeService, `renderer.log` fo
 [2026-07-12 23:02:46.951] [warn]  (utility) sidecar exited { code: 0 }
 ```
 
-### 5. Find the Fix
+### 5. Inspect App Data Files for Stored Error Notifications
+
+Many Electron apps persist error notifications, plugin load failures, and crash context in their data/config files — not just logs. These can reveal errors that happen during startup before the logging system is fully initialized, or errors that the UI stored for display but never logged to a file.
+
+```bash
+# Common locations
+ls ~/.config/<app-name>/*.dat        # OpenCode: opencode.global.dat
+ls ~/.config/<app-name>/*.json       # General app state
+ls ~/.config/<app-name>/opencode.*   # OpenCode-specific data files
+```
+
+Tools to inspect them:
+
+```bash
+# Search for key terms in binary data files
+strings ~/.config/<app-name>/<file>.dat | grep -i "error\|fail\|crash\|exception"
+
+# Pretty-print JSON strings embedded in binary data
+# The 'strings' output often contains embedded JSON
+strings ~/.config/<app-name>/<file>.dat | grep -o '{.*}' | head -5 | python3 -m json.tool 2>/dev/null || true
+
+# Full string dump for broad search
+strings ~/.config/<app-name>/<file>.dat | grep -iE "error|plugin.*fail|Cannot find module|Failed to load"
+```
+
+**Real-world case — OpenCode plugin loading errors in `opencode.global.dat`:**
+
+When the app crashed on prompt submission with SIGABRT, the `utility.log` only showed:
+```
+sidecar exited { code: 0 }
+```
+
+But `strings opencode.global.dat | grep -i error` revealed multiple stored notification entries showing:
+
+```
+Failed to load plugin file:///.../plugins/graphify.js: Cannot find module
+Failed to load plugin opencode-agent-memory: Stripping types is currently unsupported for files under node_modules
+Error: Cannot find module '.../tools/run-tests.js' imported from .../tools/index.ts
+```
+
+The third error (tool loading failure during `SessionPrompt.run`) was the SIGABRT trigger — an unhandled Node.js module resolution crash when the user submitted a prompt.
+
+This technique is especially valuable when:
+- The app logs show clean exit (`code: 0`) but the process actually crashed (SIGABRT)
+- The crash happens asynchronously (e.g., only when the user interacts, not at startup)
+- The error has plugin/extension/addon loading as a possible contributor
+
+### 6. Find the Fix
 
 | Crash Pattern | Fix |
 |---------------|-----|
 | Shell crash in job table / signal handling | Upgrade the shell — zsh 5.9.1 fixes use-after-free in TRAPEXIT handling |
-| Electron utility process SIGABRT (single frame) | Check for V8 OOM — relaunch from terminal to see stderr |
+| Electron utility process SIGABRT (single frame) + app stays alive but unresponsive | Check for plugin/tool loading failures in app data files; verify plugin paths resolve to compiled JS |
 | Electron renderer crash | Check GPU drivers, disable hardware acceleration as test |
 | Recurring crash in every session | File a bug report with the app vendor — include coredumpctl output |
 
-### 6. Capture V8/Node.js Diagnostic Output
+### 7. Capture V8/Node.js Diagnostic Output
 
 When a Node.js utility process crashes, `coredumpctl info` often shows only 1 frame. To get the actual error:
 
@@ -210,31 +260,106 @@ _block_chld_exit() { trap '' CHLD; }
 - **`nocheckjobs` does NOT prevent this crash** — it only suppresses the warning about running jobs on exit. The crash happens in signal handling, not in the check warning.
 - **This is triggered by terminal close** (closing an Alacritty/Kitty/GNOME Terminal tab or window) or by system logout, because both send SIGHUP to the shell's process group.
 
-### Case 2: Electron NodeService SIGABRT (single-stack-frame crash)
+### Case 2: Electron NodeService SIGABRT (single-stack-frame crash) — Plugin/Config Loading Failure
 
 **Signature:**
 ```
-Signal: 6 (ABRT)
+Signal: 6 (ABRT) si_code: SI_TKILL
 Stack trace:
   #0  0x00007f... n/a (n/a + 0x0)
   ELF object binary architecture: AMD x86-64
+  ...
+  Command Line: ... --type=utility --utility-sub-type=node.mojom.NodeService ...
 ```
 
 **Analysis:**
-1. Only 1 frame with no library — crash is inside V8 JIT-compiled code
-2. Process is `node.mojom.NodeService` — Electron's in-process Node.js runtime
-3. SIGABRT means `abort()` was called explicitly (not a SEGV)
-4. App log shows `sidecar exited { code: 0 }` at the same timestamp
+1. Only 1 frame with no library — crash is inside V8 JIT-compiled JavaScript code
+2. `si_code: SI_TKILL` confirms the process killed itself intentionally
+3. Process is `node.mojom.NodeService` — Electron's in-process Node.js runtime, NOT the main process
+4. App log shows `sidecar exited { code: 0 }` at the same timestamp — the main process detected the exit but couldn't distinguish abort from clean exit
+5. When the app UI stays alive but doesn't respond to prompts, the NodeService is the crash victim
 
 **Most likely causes (in order):**
+- Unhandled Node.js exception during prompt/tool execution (common with plugin loading failures)
 - V8 heap OOM (`FATAL ERROR: Reached heap limit Allocation failed`)
-- V8 internal assertion failure (DCHECK)
 - Native Node.js module crash (`.node` files like pty.node, msgpackr)
 
-**Diagnosis:** Relaunch app from terminal to capture stderr where V8 writes the abort reason.
+**Diagnosis path:**
+
+1. Check app data files for stored error notifications (see section 5 above)
+2. Look for plugin/tool loading errors — they crash during `SessionPrompt.run` when the interactive service tries to resolve all configured tools
+3. Check the app's config directory for third-party plugin/extension configs that may point to wrong paths:
+
+```bash
+# Check for config files that load plugins
+cat ~/.config/<app>/.opencode/opencode.json | python3 -c "
+import json,sys; c=json.load(sys.stdin)
+print('plugin:', c.get('plugin','(none)'))
+print('skills paths:', c.get('skills',{}).get('paths','(none)'))
+"
+```
+
+4. Verify that plugin paths resolve — look for TypeScript source files where compiled JS is expected:
+
+```bash
+# Compare source vs dist for compiled artifacts
+ls <plugin-dir>/*.ts 2>/dev/null    # TypeScript source
+ls <plugin-dir>/*.js 2>/dev/null    # Expected compiled output
+ls <dist-dir>/         2>/dev/null  # Alternative build output location
+```
+
+**Real-world fix — ECC (Everything Claude Code) OpenCode plugin/tools path mismatch:**
+
+The ECC tool's `opencode.json` had:
+```json
+"plugin": ["./plugins"]
+"skills": {"paths": ["../skills"]}
+```
+
+The compiled JavaScript artifacts were in `./dist/plugins/` and `./dist/tools/`, but the config pointed to the TypeScript source directories. The source `.ts` files contain `.js` imports (standard TS compile output resolution), and when OpenCode tried to load them, module resolution failed.
+
+**Critical subtlety:** OpenCode auto-discovers the `tools/` directory NEXT to the config file, independently of the `plugin` config field. Changing `"plugin"` to `"./dist/plugins"` fixes plugin loading, but the `tools/` directory is still auto-discovered from its source location. This means fixing the plugin path alone is NOT sufficient — the tools directory must also be fixed.
+
+**Fix (two parts):**
+
+Part 1 — Config paths:
+```json
+"plugin": ["./dist/plugins"]
+"skills": {"paths": ["./skills"]}
+```
+
+Part 2 — Symlink compiled JS into source directories (fixes auto-discovery):
+```bash
+cd ~/.opencode/tools
+for f in changed-files check-coverage dependency-analyzer format-code git-summary index lint-check run-tests security-audit; do
+  ln -sf "../dist/tools/${f}.js" "${f}.js"
+done
+
+cd ~/.opencode/plugins
+ln -sf "../dist/plugins/index.js" "index.js"
+ln -sf "../dist/plugins/ecc-hooks.js" "ecc-hooks.js"
+mkdir -p lib && ln -sf "../../dist/plugins/lib/changed-files-store.js" "lib/changed-files-store.js"
+```
+
+**Framing note — crash vs unresponsiveness:** When investigating this class of bug, always frame findings in terms of the FUNCTIONAL impact first. Telling the user "the Node.js utility process SIGABRTs" is technically correct but misses the point — the user experience is "the app won't answer my prompts." The crash is a symptom, not the problem. State the functional impact first, then explain the crash mechanism as the root cause.
 
 **Binary freshness check:** Check if the app binary was recently updated — a new version could have introduced a regression:
 ```bash
 stat /opt/<app>/<binary>
 # Compare with crash time
+```
+
+**Timeline comparison technique:** When a crash started after a specific event (config change, install, update), compare crash behavior before and after:
+
+```bash
+# List all log sessions
+ls -lt ~/.config/<app>/logs/
+# Note the session timestamps relative to the known event
+# Check each session's utility.log for exit code pattern
+for d in ~/.config/<app>/logs/*/; do
+  echo "$(basename $d): $(cat $d/utility.log 2>/dev/null || echo no utility.log)"
+done
+
+# Check coredump count before vs after
+journalctl --user -u systemd-coredump* --since "YYYY-MM-DD" | grep -c '<app-name>'
 ```

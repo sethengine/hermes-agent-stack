@@ -1,0 +1,45 @@
+{
+  "jobs": [
+    {
+      "id": "0ececac43bad",
+      "name": "global-session-brain-extraction",
+      "prompt": "/brain extract --since 2h",
+      "skills": [
+        "global-session-brain"
+      ],
+      "skill": "global-session-brain",
+      "model": null,
+      "provider": null,
+      "base_url": null,
+      "script": null,
+      "no_agent": false,
+      "context_from": null,
+      "schedule": {
+        "kind": "cron",
+        "expr": "0 */2 * * *",
+        "display": "0 */2 * * *"
+      },
+      "schedule_display": "0 */2 * * *",
+      "repeat": {
+        "times": null,
+        "completed": 18
+      },
+      "enabled": true,
+      "state": "scheduled",
+      "paused_at": null,
+      "paused_reason": null,
+      "created_at": "2026-06-11T19:36:51.426989+03:00",
+      "next_run_at": "2026-06-14T00:00:00+03:00",
+      "last_run_at": "2026-06-13T22:04:55.261883+03:00",
+      "last_status": "ok",
+      "last_error": null,
+      "last_delivery_error": null,
+      "deliver": "local",
+      "origin": null,
+      "enabled_toolsets": null,
+      "workdir": null,
+      "profile": null
+    }
+  ],
+  "updated_at": "2026-06-13T22:04:55.262318+03:00"
+}
