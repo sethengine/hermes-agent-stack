@@ -1,7 +1,7 @@
 ---
 name: parallel-batch-processing
 description: "Fan-out/fan-in batch processing with subagents — dispatch parallel workers for independent work items, collect and aggregate results, run post-processing. For data extraction, batch file processing, migrations, and bulk operations."
-version: 1.0.0
+version: 1.1.0
 author: Hermes Agent
 license: MIT
 platforms: [linux, macos, windows]
@@ -94,14 +94,26 @@ batches = [items[i:i+2] for i in range(0, len(items), 2)]
 
 ### Step 3: Dispatch Subagents (Parallel)
 
-Use `delegate_task` with identical task structure per batch:
+Use `delegate_task` with identical task structure per batch.
+
+**⚠️ Parameter naming:** The `delegate_task` tool uses `goal` (task objective) and `context` (background info) — NOT `description` or `prompt`. Using `description`/`prompt` produces a validation error with no further guidance:
+
+> `Provide either 'goal' (single task) or 'tasks' (batch).`
+
+The `description` parameter is a separate optional UI tracking label (3-5 words, shown in the session UI), not the task prompt. Always use `goal` for the task.
+
+**⚠️ Synchronous execution in cron/one-shot mode:** The `background=true` flag is **silently ignored** in cron jobs, `hermes -z` one-shot runners, Kanban workers, and stateless HTTP endpoints. From the tool:
+
+> `background=true is not available in this session — it cannot receive a detached subagent result after the turn ends (a one-shot runner such as hermes -z, a cron job, a Kanban worker, or a stateless HTTP endpoint). The subagent(s) ran SYNCHRONOUSLY.`
+
+All subagents run **sequentially** in these contexts — no parallelism. Total wall-clock time is the sum of every subagent's runtime (observed: 34s + 67s + 31s = ~132s for 3). Plan timeouts and batch size accordingly. The pre-run lock still protects against overlapping cron jobs; only intra-run concurrency is lost.
 
 ```python
 subagents = []
 for batch in batches:
     subagents.append(delegate_task(
         goal="Process batch: extract knowledge from N sessions",
-        context=f"""
+        context=f""""
         ITEMS TO PROCESS:
         {json.dumps(batch, indent=2)}
 

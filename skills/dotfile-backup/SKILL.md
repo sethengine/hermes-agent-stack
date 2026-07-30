@@ -63,10 +63,11 @@ exec zsh
 `backup.sh`:
 1. Copies all tracked files from `$HOME` into `~/.dotfiles/`
 2. Excludes `.git` dirs and ignores theme repos (114M of alacritty themes)
-3. **Redacts secrets** from `.env` files (API keys, tokens, passwords) before commit
-4. Commits with a timestamped message listing changed files
-5. Appends a log entry to `LOG.md`
-6. Pushes to GitHub if remote is configured
+3. **Syncs directories** — removes orphaned files in the backup that no longer exist on the live system
+4. **Redacts secrets** from `.env` files (API keys, tokens, passwords) before commit
+5. Commits with a timestamped message listing changed files
+6. Appends a log entry to `LOG.md`
+7. Pushes to GitHub if remote is configured
 
 ## Restore Script
 
