@@ -34,6 +34,9 @@ Syncs everything. For partial syncs:
 | `~/.local/bin/searxng-mcp` | `mcp-bridge/searxng-mcp` |
 | `~/.hermes/skills/*/` | `skills/` (all SKILL.md + references/scripts) |
 | `~/.hermes/sessions/` (recent) | `sessions/` (last 5 session JSONs) |
+| `~/.hermes/memories/` | `memory/` (MEMORY.md, USER.md — active memory) |
+| `~/.hermes/memory/` | `memory/legacy/` (older system-tuning notes) |
+| `~/.hermes/brain/` | `brain/` (wiki notes + graphify artifacts) |
 | `~/.dotfiles/` (via `backup.sh`) | `system/` mirror — latency-tuning root files (cpu0 HWP fix, IRQ pin, prio guard) |
 
 ## How it works
@@ -49,9 +52,12 @@ Syncs everything. For partial syncs:
 Run the script directly — do NOT inline the code from this doc:
 
 ```bash
-bash ~/.hermes/skills/github-stack-sync/scripts/sync.sh            # all (configs+skills+bridge+sessions+dotfiles)
+bash ~/.hermes/skills/github-stack-sync/scripts/sync.sh            # all (configs+skills+bridge+sessions+memory+brain+dotfiles)
 bash ~/.hermes/skills/github-stack-sync/scripts/sync.sh configs   # configs only
 bash ~/.hermes/skills/github-stack-sync/scripts/sync.sh skills    # skills only
+bash ~/.hermes/skills/github-stack-sync/scripts/sync.sh sessions  # session history only
+bash ~/.hermes/skills/github-stack-sync/scripts/sync.sh memory    # memory (MEMORY.md, USER.md) only
+bash ~/.hermes/skills/github-stack-sync/scripts/sync.sh brain     # session brain (wiki + graphify) only
 bash ~/.hermes/skills/github-stack-sync/scripts/sync.sh dotfiles  # dotfile-backup only
 ```
 

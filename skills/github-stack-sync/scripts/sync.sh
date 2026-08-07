@@ -3,7 +3,7 @@
 # Real script backing the github-stack-sync skill (not inline markdown).
 # Also chains the dotfile-backup so system latency-tuning files stay mirrored.
 #
-# Usage: sync.sh [all|configs|skills|bridge|sessions|dotfiles]
+# Usage: sync.sh [all|configs|skills|bridge|sessions|memory|brain|dotfiles]
 set -euo pipefail
 
 REPO="${HOME}/.config/.src/hermes-stack"
@@ -68,6 +68,21 @@ if [ "$MODE" = "all" ] || [ "$MODE" = "sessions" ]; then
     ls -t ~/.hermes/sessions/session_*.json 2>/dev/null | head -5 | while read -r f; do
         cp "$f" sessions/ 2>/dev/null || true
     done
+fi
+
+# ---- Sync memory (active + legacy notes) ----
+if [ "$MODE" = "all" ] || [ "$MODE" = "memory" ]; then
+    echo "[stack-sync] memory..."
+    mkdir -p memory
+    cp -r ~/.hermes/memories/. memory/ 2>/dev/null || true
+    cp -r ~/.hermes/memory/. memory/legacy/ 2>/dev/null || true
+fi
+
+# ---- Sync brain (session brain: wiki + graphify artifacts) ----
+if [ "$MODE" = "all" ] || [ "$MODE" = "brain" ]; then
+    echo "[stack-sync] brain..."
+    mkdir -p brain
+    cp -r ~/.hermes/brain/. brain/ 2>/dev/null || true
 fi
 
 # ---- Chain: dotfile-backup (mirrors system latency-tuning files) ----
