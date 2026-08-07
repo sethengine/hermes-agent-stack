@@ -46,18 +46,18 @@ if [ "$MODE" = "all" ] || [ "$MODE" = "bridge" ]; then
     cp ~/.local/bin/searxng-mcp mcp-bridge/searxng-mcp 2>/dev/null || true
 fi
 
-# ---- Sync skills (includes our modified dotfile-backup skill) ----
+# ---- Sync skills (preserves nested layout, e.g. devops/dotfile-backup) ----
 if [ "$MODE" = "all" ] || [ "$MODE" = "skills" ]; then
     echo "[stack-sync] skills..."
     rm -rf skills/
     mkdir -p skills
-    for skill in ~/.hermes/skills/*/; do
-        name=$(basename "$skill")
-        [ -f "$skill/SKILL.md" ] && cp -r "$skill" "skills/$name/"
-    done
+    # Copy every skill dir (top-level OR nested) preserving relative path
+    # under ~/.hermes/skills/ into skills/
     find ~/.hermes/skills -name "SKILL.md" -not -path "*/skills/*/skills/*" | while read -r f; do
-        dir=$(dirname "$f"); name=$(basename "$dir")
-        [ ! -d "skills/$name" ] && cp -r "$dir" "skills/$name" 2>/dev/null || true
+        dir=$(dirname "$f")                     # e.g. ~/.hermes/skills/devops/dotfile-backup
+        rel=${dir#"$HOME/.hermes/skills/"}      # e.g. devops/dotfile-backup
+        mkdir -p "skills/$rel"
+        cp -r "$dir/." "skills/$rel/"
     done
 fi
 
