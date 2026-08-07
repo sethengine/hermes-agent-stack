@@ -162,3 +162,17 @@ esac
 - GRUB params: `preempt=full threadirqs intel_idle.max_cstate=1 processor.max_cstate=1 skew_tick=1 ...`
 
 Tested: `min_perf_pct` values 25 → 70 → 90. At 70, cores idle at 1.8-4.6 GHz. At 90, idle at 4.3-5.1 GHz. 70 was chosen as the best trade-off.
+
+## Related: cpu0 HWP resume-lock (governor can't fix — MSR write does)
+
+**Separate failure mode from the read-only EPP issue above.** After suspend/resume the boot
+P-core (cpu0) can stay hard-stuck at 400 MHz (below its own 800 MHz floor) while siblings
+boost to 5.2 GHz. Root cause: firmware clamps cpu0's `IA32_HWP_REQUEST` MSR (0x774) to a low
+value (`0xd0d`); the cpufreq governor is a separate plane so `cpupower -g performance`
+(already running) does nothing. Fix and persistence in the latency-fix resume hook:
+
+```bash
+wrmsr -p0 0x774 0x5757   # cpu0 800 MHz -> 5.2 GHz, holds under load
+```
+Full transcript + diagnosis: `references/cpu0-hwp-resume-lock.md`. Do NOT confuse with the
+EPP false alarm (`verify-epp-via-msr-not-sysfs.md`).

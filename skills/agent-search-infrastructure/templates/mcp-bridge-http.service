@@ -1,0 +1,29 @@
+# MCP Research Bridge (HTTP mode, port 8090) — SearXNG search for remote agents
+# Known-good user unit. Pitfall: do NOT add Requires=/After=docker.service —
+# docker.service is a SYSTEM service, invisible from systemctl --user, and the
+# unit fails with "Unit docker.service not found". Restart=always + the
+# StartLimitIntervalSec=0 below covers the SearXNG boot race (retries every 5s).
+#
+# Install:
+#   cp mcp-bridge-http.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now mcp-bridge-http.service
+# Verify:
+#   systemctl --user is-active mcp-bridge-http.service   # -> active
+#   curl -s -o /dev/null -w "%{http_code}\n" http://127.0.0.1:8090/mcp   # -> 200
+
+[Unit]
+Description=MCP Research Bridge (HTTP mode, port 8090) — SearXNG search for remote agents
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3.14 /home/sethengine/.local/bin/mcp-bridge --http-port 8090
+Restart=always
+RestartSec=5
+StartLimitIntervalSec=0
+# Binds all interfaces by default — reachable from other LAN hosts as http://<host>:8090/mcp
+
+[Install]
+WantedBy=default.target

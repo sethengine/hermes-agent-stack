@@ -28,6 +28,8 @@ Use this skill when the user asks about any of:
 - Path MTU discovery on WiFi or capped links
 - Wireless latency spikes or throughput below expected
 - Network module parameters (iwlwifi, iwlmld, cfg80211) investigation
+- Native game input lag / Dota 2 / Source 2 / non-Proton game performance debugging
+- Steam Linux Runtime / pressure vessel CPU affinity questions
 
 ## Multi-Layer System Audit
 
@@ -212,7 +214,9 @@ See `references/irq-affinity-diagnosis.md` for the hex decoding table and standa
 - `references/irq-affinity-diagnosis.md` — Hex mask decoding table and standalone IRQ diagnosis commands
 - `references/zsh-startup-optimization.md` — Shell startup latency: dead plugin managers, dual theme, async fixes, compdump cleanup
 - `references/pin-irqs-dynamic.sh` — Installable script for dynamic IRQ pinning
-- `references/wifi-intel-be200-be20x-investigation.md` — Intel BE200/BE202 WiFi 7 investigation: iwlmld power_scheme CAM, disable_11be, bt_coex, MTU probe methodology, TCP tuning, known ASPM instability background
+- `references/wifi-intel-be200-be20x-investigation.md` — Intel BE200/BE202 WiFi 7 investigation: power_scheme CAM, disable_11be, bt_coex, MTU probe methodology, TCP tuning, known ASPM instability background
+- `references/complete-parameter-audit.md` — Reusable subagent prompt template for the FULL sysctl+cmdline+CPU parameter audit; enforces a sourced best value (Source URL) per row, not opinion verdicts
+- `references/native-game-input-lag-diagnosis.md` — Native Linux game (non-Proton) input lag diagnosis: GPU/CPU utilization imbalance, Dota 2 / Source 2 thread analysis, Steam pressure vessel CPU affinity, launch options, KWin compositor gaming settings, EasyEffects blocklist, full IRQ topology dump per-CPU
 
 ### C-state locking for IRQ cores
 GPU/USB IRQ cores can enter deep C3 sleep (1048μs wake latency) between interrupts. Lock them to C1 only by disabling C2+.
@@ -749,6 +753,39 @@ This applies to ALL tuning/debugging output for this user. "Show me the command 
 
 When the user asks you to write a prompt that an LLM will use for system auditing, use **methodology-driven descriptions** (scope and intent per layer) rather than prescribing specific commands. Tell the LLM *what domain to audit and what to look for*, not *which exact commands to run*. This lets the LLM discover files, paths, and tools based on the actual system state rather than being boxed into pre-written commands that may not apply. Layer descriptions should define the scope, not the specific checks.
 
+## Complete Parameter-Surface Audit (sysctl + cmdline + env)
+
+When the user asks to "go through every config/parameter of the system and find the best" — the **full audit** — the previous two rules are hard lessons from a correction:
+
+1. **Cover the entire parameter surface, not just the tuned layers.** Do NOT audit only My earlier tuning/the already-optimized layers. On this box `sysctl -a` reports ~3570 tunables (3300 are `net.*` per-interface noise; the meaningful set is ~340). Extract and audit the meaningful whole: `kernel.*` (~142), `vm.*` (50), `fs.*` (54), `net.core`/non-interface `net.*` (70), `user.*` (12), `dev.*` (9), `debug.*` (2), `abi.*` (1), plus `/proc/cmdline` and the CPU tunables (governor, min/max_perf_pct, epp, max_cstate). Skipping the majority is exactly the "crap, not covering 10% of what the system has" complaint.
+
+2. **Give the researched authoritative best value — not your own verdict.** Do not emit `✅ Good` / `⚠️ Minor` opinion rows. The user specifically asked: "look online for best one", "research the answer for best option — not your takeaway". Every recommended value must carry a **real Source URL**: kernel.org (`admin-guide/sysctl/vm.html`, `kernel-parameters.html`), kernel.org kernel-internals (sysctl-reference, sched-tuning), Red Hat docs, dolpa.me sched tuning, CachyOS/Arch guides, NVIDIA forums, Proton docs. If no source is found for a parameter, say "no authoritative source found" rather than invent a value.
+
+### Workflow
+
+1. **Make the plan first** (the user insists: "make the plan first, a complete one"). Enumerate every layer up front.
+2. **Extract the full baseline to files** (do not eyeball):
+   ```bash
+   mkdir -p ~/audit
+   sysctl -a 2>/dev/null | grep -vE "^net\.(ipv4|ipv6|core|bridge|nf_conntrack)" > ~/audit/current_sysctl.txt
+   cut -d= -f1 ~/audit/current_sysctl.txt | awk -F. '{print $1}' | sort | uniq -c   # group counts
+   cat /proc/cmdline > ~/audit/current_cmdline.txt
+   { echo "governor=$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor)"; \
+     echo "driver=$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_driver)"; \
+     echo "min_perf=$(cat /sys/devices/system/cpu/intel_pstate/min_perf_pct)"; \
+     echo "max_perf=$(cat /sys/devices/system/cpu/intel_pstate/max_perf_pct)"; \
+     echo "epp=$(cat /sys/devices/system/cpu/cpu0/cpufreq/energy_performance_preference)"; } > ~/audit/current_cpu.txt
+   ```
+3. **Delegate the per-parameter research to a subagent** rather than doing 350 lines of web research inline. Hand the subagent the baseline file paths + the use-case context + output format, and instruct it: for EACH parameter find the authoritative best value with a real source URL; group "leave at default" ones; also recommend MISSING cmdline tokens. Give it the sourced prompt template — see `references/complete-parameter-audit.md`.)
+4. **Report**: one sourced table per group (`Parameter | Current | Recommended | Source URL | Notes`). Flag genuinely actionable issues (e.g. THP `always`+`always`, per-core C-state disable not persisting, gamemoded not running, contradictory KWin triple-buffer env). Write proposed configs to `~/` as review-only files and **do not apply anything without explicit approval.**
+
+### User expectations (hard)
+- **Plan before acting** — user will call out if you drift into collection/research without presenting the plan.
+- **Full surface** — incomplete coverage is rejected immediately and harshly.
+- **Sourced best value, not opinion** — a verdict-without-research row is a miss.
+- **Commands-first, terse output**; when presenting pending changes, show raw file content blocks labeled with target paths, zero commentary between them. (See Output Style Preference above.)
+- After any applied write, verify it landed (file content / runtime state) before reporting success.
+
 ## Workstation + Desktop + Gaming Comprehensive Tune-Up
 
 When the user asks for "all tweaks" or a complete system tune-up covering workstation, desktop responsiveness, AND gaming, use the following layered approach. Each layer is a self-contained batch of copy-paste commands.
@@ -965,6 +1002,10 @@ Each +52 bytes saved = ~3.5% throughput gain on bulk TCP flows.
 
 ### Reference
 See `references/wifi-intel-be200-be20x-investigation.md` for the full session-specific research: firmware versions, iwlmld power_scheme CAM source analysis, BE200/BE202 instability background, discovered MTU values, and the complete commands reference.
+
+### Native Game Input Lag Diagnosis
+
+See `references/native-game-input-lag-diagnosis.md` for diagnostic patterns specific to **native Linux games** (non-Proton) running through Steam's pressure vessel — Dota 2 / Source 2, native Vulkan/OpenGL titles. Covers GPU/CPU utilization imbalance diagnosis (smoking gun: GPU <15% with CPU >200%), Intel Arrow Lake 265K / NVIDIA + Wayland, Steam Linux Runtime CPU affinity check, game thread priority analysis via `/proc/[pid]/task/*/stat`, Dota 2 launch options (`-vulkan -high`), KWin compositor gaming settings (WindowsBlockCompositing, AllowTearing, VrrPolicy, LatencyPolicy), EasyEffects blocklist for game audio, full IRQ topology dump per-CPU, PipeWire quantum under game load, and NVIDIA Wayland env verification. Use when investigating input lag in a native Linux game where the render API is direct (not DXVK/VKD3D) and Steam's pressure vessel restricts CPU affinity.
 
 ### TCP Tuning for Low Latency + Throughput
 

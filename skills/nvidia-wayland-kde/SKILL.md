@@ -64,6 +64,37 @@ dmesg | grep -iE "drm|nvidia|dpms|sleep|suspend|resume|blank|modeset|hotplug" | 
 
 On Chrome/Chromium 148+ with NVIDIA + Wayland, `--use-gl=angle` **without** `--use-angle=vulkan` causes ANGLE to fall back to **SwiftShader** (software renderer) for WebGL/Canvas. This makes WebGL-heavy apps (GeoGuessr, Google Maps, Figma) run on CPU.
 
+### ⚠️ Critical: `--use-angle=desktop` / `--use-gl=desktop` are INVALID backends — they force software rendering
+
+Chrome 149+ on Linux only accepts ANGLE backends: `opengl`, `opengles`, `vulkan` (the GPU process's allowed-implementations list is `[(gl=egl-angle,angle=opengl),(gl=egl-angle,angle=opengles),(gl=egl-angle,angle=vulkan)]`). There is **no "desktop" backend**. Requesting `--use-angle=desktop` or `--use-gl=desktop` makes the GPU process request `(gl=none,angle=none)`, fail the allowed list, and force `--use-gl=disabled` → every feature in chrome://gpu shows "Software only / Disabled". `--use-gl=desktop` (native GLX) is additionally impossible on Wayland (no X11/GLX).
+
+**Fix:** remove `--use-angle=desktop` / `--use-gl=desktop` from `~/.config/chrome-flags.conf`. Valid combos on NVIDIA Wayland: `--use-gl=angle --use-angle=opengl`, or just `--use-gl=angle` with no `--use-angle` (ANGLE's Wayland default is `egl-angle/opengl`). Do NOT use `--use-angle=vulkan` (blocked on Wayland — see Critical section above).
+
+### ⚠️ CRITICAL DEBUG TRAP: terminal-launched Chrome cannot validate GPU flags
+
+Launching Chrome from a shell/terminal/background context (with or without `--remote-debugging-port`, even with NO GL flags at all) produces a **false negative** for every flag combination:
+
+```
+[ERROR:ui/gl/init/gl_factory.cc:110] Requested GL implementation (gl=none,angle=none) not found in allowed implementations: [(gl=egl-angle,angle=opengl),(gl=egl-angle,angle=opengles),(gl=egl-angle,angle=vulkan)].
+[ERROR:components/viz/service/main/viz_main_impl.cc:190] Exiting GPU process due to errors during initialization
+```
+
+The browser process has the flags on its command line, but the GPU process never receives them — the `--use-gl`/`--use-angle` handoff is broken outside the real Wayland session (missing session env: DBus, XAUTHORITY, full display-socket context). Chrome then falls back to software and you conclude "nothing works" — **WRONG, it's a harness artifact**. This exact false negative was corrected by the user ("they already were running" — their desktop-launched Chrome was the real reference).
+
+Rules:
+- Only a Chrome launched from the real desktop session (app menu / `.desktop` file / GUI) is authoritative for GPU flag testing. CDP `chrome://gpu` queries on shell-launched instances are equally affected.
+- If a terminal test shows `gl=none,angle=none`, STOP — do not extrapolate; ask the user to relaunch from their desktop and check `chrome://gpu`.
+- Real verification of a RUNNING instance: inspect the **GPU process** (not the browser process). Browser cmdline = flags PASSED; GPU process cmdline = flags USED:
+
+```bash
+for p in $(pgrep -f 'type=gpu-process'); do
+  cl=$(tr '\0' ' ' < /proc/$p/cmdline 2>/dev/null)
+  echo "PID $p: $(echo "$cl" | grep -oE -- '--use-gl=[a-z]+|--use-angle=[a-z]+')"
+done
+```
+
+`--use-gl=disabled` on the GPU process = software fallback (invalid flag or handoff failure). `--use-gl=angle` = backend actually handed off. Full session detail: `references/chrome-gpu-backend-validation.md`.
+
 ### MangoHud Pitfall: vulkan_present_mode=immediate + fps_limit=0 = no cap
 
 Setting `vulkan_present_mode=immediate` in MangoHud.conf tells the Vulkan driver to present frames as fast as possible with zero waiting. This **overrides both vsync and fps_limit** — MangoHud cannot cap FPS when immediate mode is active because the Vulkan present queue never waits.
@@ -196,7 +227,7 @@ If chrome://gpu shows "GPU process was unable to boot", the most likely cause is
 | `--ignore-gpu-blocklist` | Enables GPU despite Chrome's blocklist |
 | `--disable-gpu-driver-bug-workarounds` | Stops Chrome from crippling NVIDIA with defensive hacks |
 | `--use-gl=angle --use-angle=vulkan` | ANGLE with Vulkan backend — only for AMD/Intel on Wayland. **DOES NOT WORK** on NVIDIA Wayland (Vulkan init fails). |
-| `--use-gl=desktop` | Native OpenGL (fallback if Vulkan unstable) |
+| `--use-gl=desktop` / `--use-angle=desktop` | **INVALID on Chrome 149** — not an ANGLE backend; forces `--use-gl=disabled` (software). Also impossible on Wayland (no GLX). |
 | `--enable-native-gpu-memory-buffers` | **Do NOT use** on NVIDIA Wayland — causes rendering corruption |
 
 ### Verify in chrome://gpu
@@ -389,6 +420,45 @@ systemctl cat nvidia-resume.service | grep ExecCondition
 /usr/bin/modinfo -F license nvidia | grep -qiE 'nvidia|mit/gpl'; echo $?
 # Should print 0
 ```
+
+### Third Wake-Failure Mode: systemd-sleep Hook Runs as Root (No Wayland Session)
+
+Not every black-screen-after-wake is the ExecCondition bug or GSP link training. If the
+user has a custom `/usr/lib/systemd/system-sleep/` hook (e.g. a latency-fix hook) that
+calls `kscreen-doctor` or `qdbus` on resume, those commands run **as root** and silently
+fail — root has no `WAYLAND_DISPLAY`, no `XDG_RUNTIME_DIR=/run/user/<uid>`, and no
+session bus. Typical stderr (often hidden by `2>/dev/null` in hooks):
+
+```
+kscreen-doctor: could not connect to display
+qt.qpa.plugin: Could not find the Qt platform plugin "wayland" in ""
+qdbus: could not connect to display
+```
+
+Result: the DP link is never re-driven → black screen → user thinks sleep broke the GPU
+and reboots. Diagnosis: `journalctl --list-boots` shows a fresh boot (not a resume), and
+the previous boot's log has the silent kscreen/qdbus failures in the post-resume window.
+
+**Fix:** bridge every session-dependent command via `runuser` into the user session:
+
+```bash
+run_as_user() {
+    runuser -u sethengine -- env \
+        XDG_RUNTIME_DIR=/run/user/1000 \
+        WAYLAND_DISPLAY=wayland-0 \
+        QT_QPA_PLATFORM=wayland \
+        "$@" 2>/dev/null
+}
+run_as_user kscreen-doctor output.DP-3.disable
+sleep 2
+run_as_user kscreen-doctor output.DP-3.enable
+sleep 2
+run_as_user kscreen-doctor output.DP-3.mode.3440x1440@165
+```
+
+Also use `qdbus6` (at `/usr/bin/qdbus6`), never bare `qdbus` — `qdbus` only exists at
+`/usr/lib/qt6/bin/qdbus`, which is not on root's PATH. Full detail, known-good hook, and
+non-root testing commands in `linux-desktop-latency-tuning` skill → `references/sleep-hook-wayland-session-bridge.md`.
 
 ### Fixes
 
@@ -1240,6 +1310,71 @@ UnredirectFullscreen=true       # Direct scanout for games
 VrrPolicy=Never                 # "Never" or "FullscreenOnly" safest on NVIDIA
 ```
 
+### KWIN_COMPOSE — only `O2`, `O2ES`, `Q` are valid on KWin 6
+
+`KWIN_COMPOSE` is parsed in exactly two places in KWin 6: `src/options.cpp` (switch on first char: `O`/`Q`) and `src/compositor.cpp` (exact-match `O2`/`O2ES`). Verified against v6.7.3 source matching installed `kwin 6.7.3-1.1`.
+
+| Value | Effect |
+|-------|--------|
+| `O2` | Force **OpenGL 2** compositing (skips the driver's `recommendedCompositor()` check) |
+| `O2ES` | Force **OpenGL 2 + EGL** platform (OpenGL ES) — same as O2 plus EGL |
+| `Q` | Force **QPainter** (software) compositing |
+| `O`, `X`, `N`, anything else | `"Unknown KWIN_COMPOSE mode set, ignoring"` → OpenGL attempt fails → **KWin exits** with `"Could not fulfill the requested compositing mode in KWIN_COMPOSE"` |
+
+XRender (`X`) was removed in the Plasma 6 port; the DRM (Wayland) backend only supports `{OpenGL, QPainter}`. `O` is a KDE4-era value still quoted by old tutorials — **it kills KWin 6 at login**, do not suggest it.
+
+**This user's env already has `KWIN_COMPOSE=O2ES`** (with `KWIN_DRM_ALLOW_TEARING=1`, `KWIN_TRIPLE_BUFFER=0`, `KWIN_DRM_DISABLE_TRIPLE_BUFFERING=1`). That's the correct NVIDIA + Wayland value — leave it. If a login fails with "Could not fulfill", hunt for a stale `KWIN_COMPOSE=O`.
+
+Historical values (KWin 4: `O`/`X`/`Q`/`N`; KWin 5.27: `O`/`Q`/`N` + O2ES-forces-EGL), the full source-verified analysis, and the fetch-source-at-exact-tag verification recipe: `references/kwin-compose-env-var.md`
+
+### ⚠️ LLM guides hallucinate KWIN_COMPOSE flags — `O2V`, "latest OpenGL 4" don't exist
+
+`KWIN_COMPOSE=O2V` is a hallucinated value that appears in AI-generated guides. Verified against v6.7.3 source: `O2V` starts with `O` (options switch) but fails the exact-match `O2`/`O2ES` check in `compositor.cpp` → KWin exits at login, same as plain `O`. **There is no OpenGL-version flag** — `KWIN_COMPOSE` only selects the compositing *backend*. GL version negotiation (verified against v6.7.3 source + live `eglinfo -B` on driver 610.43.03): KWin requests desktop GL **3.1** — all 5 desktop context candidates call `setVersion(3, 1)` via EGL_KHR_create_context (eglcontext.cpp) — and NVIDIA delivers **4.6** (driver returns its max ≥ requested). KWin then feature-detects what it got: 3.2 (sync/indexed quads), 3.3 (texture swizzle), 4.2 (texture storage), 4.4 (buffer storage). There is NO config to pick 3 vs 4 — the driver decides. The only valid values on KWin 6 are the three in the table above. Treat any other `KWIN_COMPOSE=` value an LLM or old wiki suggests as invalid until source-verified.
+
+### No live reload — changing KWIN_COMPOSE requires relog
+
+`KWIN_COMPOSE` is read once at compositor start (`qgetenv` in `attemptOpenGLCompositing()`); a running kwin process's env cannot be mutated from outside. Verified non-paths:
+
+- `qdbus org.kde.KWin /Compositor reinitialize` re-reads the var **from the running process's own env** (unchanged) → no effect
+- `kwin_wayland --replace` on Wayland just tells the old instance to exit; systemd restarts it with the **systemd user env, not your shell's** — `export` in a terminal does NOT propagate. Must first `systemctl --user set-environment KWIN_COMPOSE=...` (and the restart still kills all Wayland clients ≈ session restart)
+- Only reliable procedure: set it in `~/.config/plasma-workspace/env/`, `~/.config/environment.d/`, or via `systemctl --user set-environment`, then log out/in
+
+Full mechanics + source citations in `references/kwin-compose-env-var.md`.
+
+### ⚠️ Plasma 6.8 drops desktop OpenGL — KWin is GLES-only
+
+KDE announced (2026-07, Phoronix + KWin merge request !9488 by Xaver Hugl): *"going forward, KWin will only support OpenGL ES... everyone is running the same OpenGL code"*. **`KWIN_COMPOSE=O2` (desktop GL) is a 6.7.x-only option** — after upgrading to Plasma 6.8, KWin is OpenGL ES regardless of KWIN_COMPOSE. Do not build advice around forcing desktop GL long-term; on this user's 6.7.3 + NVIDIA 610 box the delivered desktop GL is 4.6 and GLES is ES 3.2 (driver max), so there is no functional reason to prefer O2 over the already-set O2ES.
+
+### ⚠️ env-dir landmine: `~/.config/plasma-workspace/env/*.sh` — last export wins
+
+Plasma sources every `*.sh` in `~/.config/plasma-workspace/env/` at login in **lexicographic order**; the **last `export` of a variable wins**. A later file silently overrides an earlier one. On this machine: `kwin-opengl.sh` (sets `KWIN_COMPOSE=O2ES`) sorts BEFORE `kwin.sh`, which once carried a live `export KWIN_COMPOSE=O` (invalid → session killer). That line is now commented out, but the pattern is the lesson: when investigating KWIN_COMPOSE (or any KWin env var), check ALL files in the dir — `grep -l 'export KWIN_COMPOSE' ~/.config/plasma-workspace/env/*.sh` — and simulate order: `unset KWIN_COMPOSE; for f in $(ls ~/.config/plasma-workspace/env/*.sh | sort); do . "$f"; done; echo $KWIN_COMPOSE`. Also verify the systemd user env (`systemctl --user show-environment`) — it can carry stale values too. `kwin-opengl.sh` is this user's designated KWin backend switch file (name is arbitrary — only content + directory matter).
+
+### ⚠️ Pitfall: `nvidia_drm.modeset` uses an UNDERSCORE in cmdline/config — grep gotcha
+
+When verifying whether NVIDIA kernel modesetting is active, the driver param is spelled with an **underscore**: `nvidia_drm.modeset=1` (both in `/proc/cmdline` and in `/etc/modprobe.d/nvidia*.conf` `options nvidia_drm ...`). Grepping for a hyphen (`nvidia-drm`) returns nothing even though modeset is ON — a false "modeset is not set" that leads to a wrong root-cause theory and wasted edits. Always grep for the underscore:
+
+```bash
+echo "=== runtime cmdline ==="; tr ' ' '\n' < /proc/cmdline | grep -iE 'nvidia_drm|nvidia-drm' || echo "no modeset param"
+echo "=== modprobe config ==="; grep -RH 'modeset\|color_pipeline\|fbdev' /etc/modprobe.d/nvidia*.conf 2>/dev/null
+```
+
+Note `cat /sys/module/nvidia_drm/parameters/modeset` returns "Permission denied" to non-root (not a sign it's absent). And grub.cfg on Manjaro goes stale if not regenerated after editing `/etc/default/grub` — always cross-check the LIVE `/proc/cmdline`, which is the source of truth.
+
+### XWayland dmabuf import failure (`error 7: importing the supplied dmabufs failed`)
+
+Symptom: only some windows fail (often X11 clients — "only 3 windows" / "no GUI"), and the journal shows:
+```
+kwin_wayland_wrapper[PID]: XWAYLAND: [destroyed object]: error 7: importing the supplied dmabufs failed
+kwin_wayland_wrapper[PID]: (EE) failed to dispatch Wayland events: Protocol error
+kwin_wayland[PID]: error in client communication (pid ...)
+```
+Key triage: if `nvidia_drm.modeset=1` is ALREADY present in the live `/proc/cmdline` (see underscore gotcha above), the modeset-missing theory is eliminated. Remaining suspects to chase in order:
+1. `color_pipeline=1` in `/etc/modprobe.d/nvidia_drm` options — new NVIDIA color API, known to break dmabuf import on KWin 6.7.x with some 600-series GPUs. Changing it requires reboot (module already loaded).
+2. Explicit-sync handshake (linux-drm-syncobj) between KWin and the driver — toggle `KWIN_DRM_DISABLE_EXPLICIT_SYNC=1` in `~/.config/environment.d/`, needs only logout/login.
+3. Confirm scope: if only XWayland/X11 apps break while Wayland apps are fine, it's an XWayland-dmabuf path issue, not a compositor crash.
+
+Do NOT jump to changing GRUB or nvidia.conf for "modeset" without first verifying `/proc/cmdline`. Also note: an "error in client communication (pid ...)" or stray "segfault in VulkanDevice" text in an `agent`/python tool log inside the journal is NOT a real KWin crash — a genuine KWin crash would have a backtrace under the `kwin_wayland_wrapper`/`kwin_wayland` units, and `~/.xsession-errors` is usually empty on Wayland (all errors go to journald). Full session detail: `references/xwayland-dmabuf-import-failure.md`.
+
 ### Pitfall: KWIN_DRM_NO_ATOMIC
 
 Do NOT set `KWIN_DRM_NO_ATOMIC=1` to work around DPMS wake failures. This forces KWin to use legacy modesetting, which **breaks explicit sync** on NVIDIA Wayland. Explicit sync (driver 555+/KWin 6.1+) requires atomic KMS. Breaking it causes stutter and tearing that's worse than the DPMS problem. Use the GSP firmware fixes in this skill instead.
@@ -1736,8 +1871,11 @@ DXVK (DX9-11) and VKD3D-Proton (DX12) use different HDR env vars. Check which re
 | `references/nvidia-open-vs-dkms-blackwell.md` | Reference | nvidia-open vs nvidia-dkms for Blackwell RTX 50-series — module requirements, GSP implications, and known issues |
 | `references/nvidia-suspend-resume-execcondition.md` | Reference | NVIDIA 595+ module license changed to "Dual MIT/GPL" — suspend/resume services skipped, black screen after wake, systemd drop-in override fix |
 | `references/invisible-cursor-nvidia-wayland.md` | Reference | Invisible cursor on NVIDIA Wayland — KWIN_FORCE_SW_CURSOR fix, cursor theme switching, xcb-cursor check, KWin restart pitfalls |
+| `references/kwin-compose-env-var.md` | Reference | KWIN_COMPOSE env var semantics for KWin 6 — valid values (O2/O2ES/Q only), historical values, exit-on-invalid behavior, and the source-verification recipe |
+| `references/xwayland-dmabuf-import-failure.md` | Reference | XWayland `error 7: importing the supplied dmabufs failed` + protocol error — underscore-vs-hyphen grep gotcha for nvidia_drm.modeset, suspects (color_pipeline / explicit-sync), and journal-noise triage |
 | `references/proton-d2r-nvidia-wayland.md` | Reference | D2R-specific: ProtonDB findings, launch options, settings debugging, and frame limiter fixes for NVIDIA Wayland |
 | `references/chrome-archwiki-flags-research.md` | Reference | Chrome flag configuration from ArchWiki — tested configs, pitfall matrix, and authoritative documentation for NVIDIA + Wayland |
+| `references/chrome-gpu-backend-validation.md` | Reference | Chrome GPU backend validation — invalid `--use-angle=desktop`/`--use-gl=desktop`, the terminal-launch `gl=none,angle=none` false-negative trap, GPU-process /proc verification |
 | `scripts/check-irq-pinning.sh` | Script | Quick diagnostic: verify IRQ distribution + C-state + governor status after applying pinning template. Exit codes: 0=healthy, 1=warnings, 2=errors. |
 | `scripts/d2r-dlss-update.py` | Script | Auto-update any game's DLSS DLLs to the latest version from the GE-Proton manifest. Usage: `python3 scripts/d2r-dlss-update.py /path/to/game` |
 | `templates/pin-irqs-arrowlake.sh` | Template | Fixed IRQ pinning script (GPU+USB → P-cores) |

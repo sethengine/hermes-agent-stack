@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>MCP Bridge — SearXNG Web Test</title>
+<style>
+  body { font-family: system-ui, sans-serif; max-width: 800px; margin: 2rem auto; padding: 0 1rem; background: #f5f5f4; color: #1c1917; }
+  h1 { font-size: 1.3rem; }
+  input, select, button { font-size: 1rem; padding: .5rem; border-radius: 6px; border: 1px solid #d6d3d1; }
+  input { width: 60%; }
+  button { background: #1c1917; color: #fff; cursor: pointer; }
+  pre { background: #fff; border: 1px solid #d6d3d1; border-radius: 8px; padding: 1rem; white-space: pre-wrap; word-break: break-word; }
+  .meta { color: #78716c; font-size: .85rem; }
+</style>
+</head>
+<body>
+<h1>🔎 MCP Bridge — SearXNG search</h1>
+<p class="meta">Endpoint: <code id="ep">http://127.0.0.1:8090/mcp</code> · server: <span id="srv">…</span></p>
+<p>
+  <input id="q" placeholder="search query…" value="linux kernel">
+  <select id="tool">
+    <option value="web_search">web_search</option>
+    <option value="news_search">news_search</option>
+    <option value="scholar_search">scholar_search</option>
+    <option value="research_plan">research_plan</option>
+  </select>
+  <button onclick="callTool()">Search</button>
+</p>
+<pre id="out">(results appear here)</pre>
+
+<script>
+// Browser-side MCP bridge test page. Works because the bridge sends
+// Access-Control-Allow-Origin: * (CORS open). Tests the real tools/call
+// JSON-RPC path exactly as a remote agent would. Open via file:// or serve it.
+async function serverInfo() {
+  try {
+    const r = await fetch(document.getElementById('ep').textContent);
+    const j = await r.json();
+    document.getElementById('srv').textContent = j.server + ' v' + j.version + ' — ' + j.tools.length + ' tools';
+  } catch (e) { document.getElementById('srv').textContent = 'bridge not reachable: ' + e; }
+}
+
+async function callTool() {
+  const q = document.getElementById('q').value.trim();
+  const tool = document.getElementById('tool').value;
+  if (!q) return;
+  const out = document.getElementById('out');
+  out.textContent = 'searching…';
+  const body = {
+    jsonrpc: '2.0', id: 1,
+    method: 'tools/call',
+    params: { name: tool, arguments: { query: q } }
+  };
+  try {
+    const r = await fetch(document.getElementById('ep').textContent, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    });
+    const j = await r.json();
+    const t = j.result && j.result.content && j.result.content[0] && j.result.content[0].text;
+    out.textContent = t || JSON.stringify(j, null, 2);
+  } catch (e) {
+    out.textContent = 'ERROR: ' + e;
+  }
+}
+serverInfo();
+</script>
+</body>
+</html>

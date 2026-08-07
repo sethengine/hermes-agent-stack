@@ -150,6 +150,10 @@ MangoHud hooks at the Vulkan `vkQueuePresentKHR()` layer — it works regardless
 
 ---
 
+## References
+
+- `references/dota2-vulkan-launch-optimization.md` — Dota 2 Vulkan launch flags (`-vulkan -high -novid +@panorama_min_comp_layer_dimension 0 -prewarm_panorama`) that fix severe CPU/GPU imbalance, plus KWin `WindowsBlockCompositing` interplay and irqbalance enablement.
+
 ## Tips & Pitfalls
 
 1. **`DXVK_NVAPI_DRS_SETTINGS` env var with commas may break** — Steam's launch option parser can eat commas. Use individual `DXVK_NVAPI_DRS_NGX_*` env vars instead. DXVK-NVAPI's `enrichwithenv()` picks them up.

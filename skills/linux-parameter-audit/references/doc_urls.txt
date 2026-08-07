@@ -1,0 +1,41 @@
+# doc_urls.txt — authoritative per-group doc URLs to fetch with web_extract
+# (use generous char_limit ~60000-90000; web_extract saves to a local .md)
+# Fetch ONCE per group, then read the cached .md to get per-key defaults.
+
+# sysctl groups (kernel.org admin-guide/sysctl/)
+https://www.kernel.org/doc/html/latest/admin-guide/sysctl/kernel.html
+https://www.kernel.org/doc/html/latest/admin-guide/sysctl/vm.html
+https://www.kernel.org/doc/html/latest/admin-guide/sysctl/fs.html
+https://www.kernel.org/doc/html/latest/admin-guide/sysctl/user.html
+https://www.kernel.org/doc/html/latest/admin-guide/sysctl/abi.html
+# dev.* has NO central page — documented per-subsystem:
+#   hpet.txt, i915.rst, tty.rst, mac_hid, scsi  (search kernel.org for each)
+# debug.* — kernel error-handling / kprobes docs (no single sysctl page)
+
+# net (global + per-interface conf)
+https://www.kernel.org/doc/html/latest/networking/ip-sysctl.html
+
+# cmdline
+https://www.kernel.org/doc/html/latest/admin-guide/kernel-parameters.html
+
+# cpu freq / idle / cstate
+https://www.kernel.org/doc/html/latest/admin-guide/pm/intel_pstate.html
+https://www.kernel.org/doc/html/latest/admin-guide/pm/cpufreq.html
+https://www.kernel.org/doc/html/latest/admin-guide/pm/cpuidle.html
+
+# block IO / cgroup v2
+https://www.kernel.org/doc/html/latest/block/index.html
+https://www.kernel.org/doc/html/latest/admin-guide/cgroup-v2.html
+
+# THP
+https://www.kernel.org/doc/html/latest/admin-guide/mm/transhuge.html
+
+# desktop-specific (config files)
+https://wiki.archlinux.org/title/NVIDIA
+https://community.kde.org/KWin
+https://github.com/FeralInteractive/gamemode
+
+# latency override guides (cite alongside doc default when recommending non-default)
+#   https://kernel-internals.org/sched/sched-tuning/  (or search "kernel sched tuning latency")
+#   CachyOS optimization guide (search "CachyOS settings")
+#   Phoronix (search "linux latency tuning")

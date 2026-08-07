@@ -43,6 +43,15 @@ Backup your personal dotfiles to `github.com/sethengine/dotfiles` — shell conf
 **Flatpak Browser Overrides:** `.local/share/flatpak/overrides/*` (DBus integration policy for Chrome, Chromium, Firefox, LibreWolf, Waterfox)  
 **Self-Hosted Services:** `firecrawl/.env` (Firecrawl self-hosted performance config)  
 
+**System Latency Tuning (non-$HOME root files):** mirrored into `system/` (real-path layout) by `backup.sh`'s `sync_system_files()` — not via `dotfiles.txt`. Covers:
+- `system/lib/systemd/system-sleep/latency-fix` — resume hook (cpu0 HWP fix + IRQ pin + prio guard)
+- `system/etc/systemd/system/fix-cpu0-hwp-boot.service` — boot service (cpu0 HWP fix at power-on)
+- `system/usr/local/bin/pin-irqs-dynamic` — GPU/USB IRQ pinning (v6b, no forced-max)
+- `system/usr/local/bin/prio-guard` — priority tier guard (v2)
+- `system/etc/default/cpupower-service.conf` — GOVERNOR=performance
+- `system/etc/sysctl.d/99-performance.conf` — cleaned sysctl (no dead tcp_low_latency)
+- `system/docs/system-latency-tuning-2026-08-07.md` — full explanation
+
 > **Full mapping:** See `ENV-MAP.md` for every env file's source path, app origin, and purpose.
 
 ## Restoring on a New Machine
@@ -51,8 +60,12 @@ Backup your personal dotfiles to `github.com/sethengine/dotfiles` — shell conf
 # Clone
 git clone https://github.com/sethengine/dotfiles.git ~/.dotfiles
 
-# Restore all files to $HOME (originals backed up as .bak)
+# Restore all $HOME files (originals backed up as .bak)
 bash ~/.dotfiles/restore.sh --apply
+
+# Restore system latency-tuning files (cpu0 HWP fix, IRQ pin, prio guard)
+# REQUIRES ROOT — deploys to /lib, /etc, /usr/local/bin and enables boot service
+sudo bash ~/.dotfiles/restore-system.sh
 
 # Re-source shell
 exec zsh

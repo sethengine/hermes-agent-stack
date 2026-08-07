@@ -245,6 +245,23 @@ with open(f'/tmp/new_links_{ts}.json', 'w') as f:
     json.dump(links, f)
 ```
 
+## Subagent Deviation and Batch Failure Verification
+
+**Problem 1 — subagents process items outside their assigned batch.** Parallel subagents with disjoint item assignments may deviate and process an item from another batch (observed 2026-08-01: Batch B processed a Batch C session). Result: one item double-processed, another never processed, misleading "N files created" self-reports.
+
+**Problem 2 — a transient failure can zero out an entire batch.** One batch hit an HTTP 503 mid-run and produced nothing; its items were only saved because a deviating sibling happened to cover one of them. Do not assume a batch's items are done because the subagent "completed" — errors can abort silently while the summary still looks plausible.
+
+**Prevention:**
+- State the exact allowed item IDs in every subagent prompt: "Process ONLY these items: <ids>. Do not touch any other item."
+- Keep assignments disjoint, but design the post-run reconciliation (below) as the source of truth rather than relying on subagents to respect boundaries.
+
+**Mandatory post-run verification — reconcile self-reports against ground truth:**
+1. For every assigned item, confirm it is actually recorded as done in the tracking store (manifest/DB), not merely claimed by a subagent.
+2. For every batch that errored or returned 0 outputs, retry it with the SAME assignment — but first check the tracking store, since a deviating sibling may have already covered some items.
+3. Build downstream post-processing (graph injection, index updates) ONLY from outputs verified to exist on disk AND items confirmed done in the tracking store — never from subagent summaries alone.
+
+**Idempotency check on inputs (meta-items):** Before dispatching, check whether each work item's output ALREADY exists. In backlog-processing pipelines, some items are prior runs of the same pipeline (e.g., a session whose transcript is an earlier extraction subagent and whose wiki files already exist). Processing them creates duplicates and wasted tokens. If an item's described outputs are already on disk, mark it done without re-processing — read the item's first user message to spot these meta-items cheaply.
+
 ## Verification Loop
 
 After post-processing, run a verification before declaring success:

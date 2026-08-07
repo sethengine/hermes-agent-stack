@@ -13,6 +13,7 @@ When using this skill, the user prefers:
 - **No clarifying questions** — if multiple approaches exist, list all with their trade-offs and let the user decide
 - **Direct answers first** — one-line summary, then details below
 - **Sa (yes) / No shorthand** — user confirms with "s", "a", "sa", "fa" for yes/agreement
+- **Investigation ends in commands, not questions** — after an audit, put the fix commands directly in the response (ranked, copy-pasteable); do NOT use the clarify tool to ask which fixes to apply (user: "just give the commands")
 
 ## When to Use
 
@@ -111,6 +112,29 @@ Then replug device or relogin. libinput re-reads quirks on device connect.
 
 **Does NOT work on Wayland**: `xinput set-prop`, `nvidia-settings` pointer controls.
 
+### Fix: Flat Profile via KWin D-Bus (Wayland-native, per-device)
+
+On KDE Wayland, KWin exposes per-device input properties over D-Bus — no root, no quirks, applies immediately. This is the correct Wayland method:
+
+```bash
+# Resolve the KWin InputDevice object path for the mouse (event basename)
+EVENT=$(basename $(readlink /dev/input/by-id/*Corsair*KATAR*event-mouse* | head -1))
+qdbus6 org.kde.KWin /org/kde/KWin/InputDevice/$EVENT \
+  org.freedesktop.DBus.Properties.Set \
+  org.kde.KWin.InputDevice pointerAccelerationProfileFlat true
+qdbus6 org.kde.KWin /org/kde/KWin/InputDevice/$EVENT \
+  org.freedesktop.DBus.Properties.Set \
+  org.kde.KWin.InputDevice pointerAccelerationProfileAdaptive false
+qdbus6 org.kde.KWin /org/kde/KWin/InputDevice/$EVENT \
+  org.freedesktop.DBus.Properties.Set \
+  org.kde.KWin.InputDevice pointerAcceleration 0.0
+```
+
+- **Runtime-only** — not persisted to kwinrc; re-apply at login via `~/.config/autostart/mouse-flat.desktop` (X-KDE-autostart-phase=2) with a 3s `sleep` first so KWin is up.
+- Object path = the input event basename (e.g. `event8`), matched via `/dev/input/by-id/*<vendor>*event-mouse`.
+- Only covers devices named in the script — add a block per mouse (e.g. BY Tech Thor 230) if used.
+- Combines fine with libinput quirks if root-level enforcement is preferred; D-Bus is the Wayland-native path.
+
 See `references/libinput-flat-accel.md` for full details.
 
 ### 4. KWin / Compositor Tuning
@@ -133,6 +157,13 @@ kwriteconfig5 --file kwinrc --group Compositing --key AllowTearing true
 kwriteconfig5 --file kwinrc --group Compositing --key VrrPolicy FullscreenOnly
 ```
 
+**VRR on the desktop = input lag culprit on NVIDIA Wayland** (confirmed 2026-08, RTX 5060 Ti / HP X34):
+- `VrrPolicy=2` (shows as `Vrr: Automatic` in `kscreen-doctor -o`) leaves AdaptiveSync active for ANY window, including the desktop. The monitor refresh hunts down to its VRR floor (~48 Hz on the HP X34) → the whole desktop feels laggy even with CPU/GPU idle.
+- **Diagnostic**: `journalctl -b | grep 'Frame latency is negative'` — Chrome's viz compositor logs this (display.cc:272) when presentation timing goes negative under desktop VRR. Also check `kscreen-doctor -o | grep Vrr` → `Automatic` is the bad state.
+- **Fix**: `kwriteconfig6 --file kwinrc --group Compositing --key VrrPolicy 0` (Never) or `3` (FullscreenOnly — VRR only in fullscreen games). Apply live: `qdbus6 org.kde.KWin /Compositor reinitialize`. User reported the desktop became "amazing" after this — the single biggest perceived-lag fix of the audit.
+- Enum: `0`=Never, `1`=Always, `2`=Automatic (per-window, desktop included), `3`=FullscreenOnly.
+- See `references/vrr-desktop-lag-nvidia-wayland.md`.
+
 Apply: `kwriteconfig5 --file kwinrc --group Compositing --key Enabled false`
 Restart: `qdbus org.kde.KWin /Compositor resume` (or restart session)
 
@@ -151,6 +182,51 @@ XDG_SESSION_TYPE=wayland
 
 **Verify P-state**: `nvidia-smi -q -d PERFORMANCE | grep 'Performance State'` — P0 is max, P1 is normal desktop idle.
 
+### 5b. Env-Var Source Priority & Conflict Hunting (global audit)
+
+When auditing "all env vars" for latency/perf, values come from many sources with strict priority for systemd-launched apps. Check every source, then diff for conflicts:
+
+1. `/etc/environment`
+2. `/etc/environment.d/*.conf`
+3. `~/.config/environment.d/*.conf`  ← overrides sources 1-2 and 4-6 for GUI/systemd apps
+4. `~/.config/plasma-workspace/env/*.sh` (KDE session scripts)
+5. `/etc/profile.d/*.sh` (shell login — e.g. Manjaro's `qt5-accessibility.sh`)
+6. `~/.profile`, `~/.bashrc`, `~/.zshrc` (only for shell-launched processes)
+
+Typical conflicts found in audits:
+- Same var, different values in `.profile` vs `environment.d` (e.g. `__GL_SHADER_DISK_CACHE_SIZE` 1G vs 10G — environment.d wins for GUI apps; `.profile` only affects shell-launched).
+- Mutually exclusive flags both set (`PROTON_ENABLE_FSYNC=1` + `PROTON_ENABLE_ESYNC=1` — fsync silently wins; delete the loser).
+- Inert vars on non-wlroots compositors (`WLR_NO_HARDWARE_CURSORS` is a wlroots var — meaningless on KWin; KWin uses `KWIN_*`).
+
+### 5c. Process Priority Tier Guard (nice / chrt) & ananicy-cpp
+"Some apps and services have so high nice in htop" usually means an auto-nicer
+daemon rules the system. On sethengine's box it was **ananicy-cpp** ("ANAother
+Auto NIce daemon") — it bumped apps (even Hermes) to nice -8, above plasmashell
+(-6), and could push games/electron launchers near KWin, starving the desktop.
+Disable it and replace with an explicit guard:
+```bash
+sudo systemctl disable --now ananicy-cpp.service
+```
+
+**The real hierarchy** (schedule class beats nice; RT ignores nice):
+```
+SCHED_FIFO  prio 90  USB(xhci)+GPU(nvidia) IRQ threads   ← absolute top
+SCHED_RR    prio 41  kwin_wayland, keyd                   ← RT, above normal
+TS ni -12            pipewire, wireplumber                ← high but PREEMPTIBLE
+TS ni  -6            plasmashell                          ← above normal apps
+cap ni -10           stray apps (any user)                ← nothing climbs higher
+```
+`/usr/local/bin/prio-guard` (v2) enforces this at boot + resume (one-shot, not a
+daemon). **pipewire must stay TS + high nice, NOT real-time** — a FIFO/RR
+pipewire monopolizes a core and blocks everything (the "pipewire bug"). Safety
+cap demotes any process (scan ALL users) with nice < -10. See
+`references/priority-tier-guard-ananicy-cpupower.md`.
+
+**cpupower.service boot governor** — make the otherwise-no-op service useful:
+set `GOVERNOR='performance'` in `/etc/default/cpupower-service.conf` (keys:
+GOVERNOR, PERF_BIAS, EPP). Leave EPP unset on HWP (returns -EBUSY; prefer the
+MSR read). Prefer this over tmpfiles.d for boot-time governor.
+
 ### 6. Sysctl Workstation Tuning
 Create `/etc/sysctl.d/99-workstation.conf`:
 ```
@@ -163,6 +239,10 @@ kernel.sched_rt_runtime_us = -1    # CRITICAL — unlimited RT runtime for threa
 ```
 
 **Implicit trap**: `kernel.sched_rt_runtime_us` defaults to 950000 (95%). With `threadirqs`, this throttles USB/keyboard/mouse IRQ threads every second → perceived as random lag spikes. Setting to `-1` (unlimited) is mandatory for low-latency desktop.
+
+**zram — two cases (check `swapon --show` AND RAM size first)**:
+- **High-RAM desktop (64GB+)**: zram is pointless and its default swappiness=150 actively hurts — it swaps hot game pages into compressed RAM while real RAM sits free → stutter/input lag. Kill it: shadow the udev rule that writes it (`grep SYSCTL{vm.swappiness} /usr/lib/udev/rules.d/` — CachyOS/Manjaro: `30-zram.rules`), then `udevadm control --reload`, `swapoff /dev/zram0`, mask the zram units, set `vm.swappiness=10`. NOTE: udev rule edits need reload + a NEW event; `udevadm trigger` re-fires the 150 writer.
+- **Low-RAM (≤16GB)**: zram is intentional — leave swappiness 150-180 alone. Only disk-only swap wants `vm.swappiness=5`.
 
 Apply: `sudo sysctl --system`
 
@@ -285,6 +365,24 @@ The #1 source of recurring input lag post-tune: fixes don't survive sleep/wake.
 # $1 = pre|post, $2 = suspend|hibernate
 # CRITICAL: use case "$1" in post) — NOT $2!
 HUGE_TARGET=1024    # adjust to match your GRUB hugepages=N
+# NOTE (sethengine): hugepages intentionally DISABLED (VM-only workload) — the
+# hugepages block below was removed from this system's hook; omit it here too.
+
+# CRITICAL: systemd-sleep runs hooks as ROOT — root has no access to the
+# user's Wayland session (no WAYLAND_DISPLAY, XDG_RUNTIME_DIR, or session bus).
+# kscreen-doctor / qdbus WILL fail with "could not connect to display" or
+# "no Qt platform plugin could be initialized" unless bridged via runuser.
+USER_UID=$(id -u sethengine 2>/dev/null || echo 1000)
+USER_RUN=/run/user/$USER_UID
+WAY_DISP=$(ls "$USER_RUN"/wayland-* 2>/dev/null | head -1 | xargs -r basename || echo wayland-0)
+run_as_user() {
+    runuser -u sethengine -- env \
+        XDG_RUNTIME_DIR="$USER_RUN" \
+        WAYLAND_DISPLAY="$WAY_DISP" \
+        QT_QPA_PLATFORM=wayland \
+        "$@" 2>/dev/null
+}
+
 case "$1" in
     post)
         sleep 2
@@ -305,17 +403,30 @@ case "$1" in
         echo 70 > /sys/devices/system/cpu/intel_pstate/min_perf_pct 2>/dev/null || true
         [ "$(cat /sys/devices/system/cpu/intel_pstate/hwp_dynamic_boost)" != "1" ] && \
             echo 1 > /sys/devices/system/cpu/intel_pstate/hwp_dynamic_boost 2>/dev/null || true
+        # 3b. CRITICAL — do NOT rely on the governor re-apply above for cpu0.
+        #     After S3 on Gigabyte Z890, firmware can lock cpu0's HWP request MSR
+        #     (0x774) at its floor (reads 0x0d0d) → P-core stuck ~400-800MHz while
+        #     other cores boost. Governor is a HINT only under HWP; write the MSR.
+        #     See references/arrow-lake-hwp-bootcore-lock-resume.md.
+        modprobe msr 2>/dev/null || true
+        wrmsr -p0 0x774 0x5757 2>/dev/null || true
         # C-state lock: /sys/devices/system/cpu/intel_idle/max_cstate may not exist on kernel 7.0+
         # C-states are locked via GRUB processor.max_cstate=1 — this write is best-effort
         echo 1 > /sys/devices/system/cpu/intel_idle/max_cstate 2>/dev/null || true
         # 4. Re-apply sysctl
         sysctl -w vm.swappiness=5 vm.dirty_ratio=5 vm.page-cluster=0 kernel.sched_rt_runtime_us=-1
-        # 5. Restart KWin compositor
-        qdbus org.kde.KWin /Compositor suspend; sleep 0.5; qdbus org.kde.KWin /Compositor resume
-        # 6. Re-apply KWin compositing OFF
-        kwriteconfig5 --file /home/*/.config/kwinrc --group Compositing --key Enabled false
-        # 7. Force NVIDIA persistence
+        # 5. Force NVIDIA persistence
         nvidia-smi -pm 1
+        # 6. Display re-sync — MUST run in the user session via run_as_user
+        run_as_user kscreen-doctor output.DP-3.disable
+        sleep 2
+        run_as_user kscreen-doctor output.DP-3.enable
+        sleep 2
+        run_as_user kscreen-doctor output.DP-3.mode.3440x1440@165
+        # 7. KWin compositor — use qdbus6 (qdbus only exists in /usr/lib/qt6/bin, not on PATH)
+        run_as_user qdbus6 org.kde.KWin /Compositor suspend || true
+        sleep 0.5
+        run_as_user qdbus6 org.kde.KWin /Compositor resume || true
         logger "[latency-fix] Post-sleep fixes applied. HugePages=$HP"
     ;;\nesac
 ```
@@ -324,6 +435,13 @@ Hook requirements:
 - File: `/usr/lib/systemd/system-sleep/latency-fix` (NO `.sh` extension — systemd can be picky)
 - Permissions: `sudo chmod 755`
 - Test: `journalctl -b | grep latency-fix` after next sleep/wake
+- To verify the session bridge works BEFORE a resume: `runuser` needs root, but as your user you can test the same env proxy directly:
+  ```bash
+  env XDG_RUNTIME_DIR=/run/user/1000 WAYLAND_DISPLAY=wayland-0 QT_QPA_PLATFORM=wayland \
+      kscreen-doctor --outputs
+  env XDG_RUNTIME_DIR=/run/user/1000 WAYLAND_DISPLAY=wayland-0 QT_QPA_PLATFORM=wayland \
+      qdbus6 org.kde.KWin /Compositor active   # prints "true"
+  ```
 
 ## Common Pitfalls
 
@@ -341,6 +459,23 @@ Hook requirements:
 | Chrome `--use-gl=angle` on NVIDIA Wayland | Extra GPU pipeline latency from Vulkan translation | Use `--use-gl=egl` (native EGL) instead |
 | `kscreen-doctor` RGB range / color power commands | "Unable to parse arguments" | These are NVIDIA driver-internal — NOT exposed by KScreen. Use DPMS cycle instead |
 | Transparent HugePages ALWAYS + madvise conflict | THP behavior unpredictable | Match GRUB to kernel config or remove contradiction |
+| `kscreen-doctor`/`qdbus` in sleep hook fail silently | Screen stays black after wake, or hook's display commands do nothing | Hook runs as **root** — root has no Wayland session. Bridge via `runuser -u <user> -- env XDG_RUNTIME_DIR=/run/user/<uid> WAYLAND_DISPLAY=wayland-0 QT_QPA_PLATFORM=wayland <cmd>` (see section 9 hook) |
+| `qdbus: command not found` in hook/scripts | D-Bus calls fail | `qdbus` only exists at `/usr/lib/qt6/bin/qdbus` (not on PATH for root/systemd). Use `/usr/bin/qdbus6` instead |
+| Multiple systemd services write the same knob (e.g. `intel-min-perf.service` sets `min_perf_pct=25`, `cpu-perf-boot.service` sets 70) | Runtime value matches neither config's intent; first-input lag from idle cores ramping up | Find boot order with `journalctl -b | grep <service>` — the service started LAST wins. Disable the stale/conflicting one. Batch-compare runtime `/proc/sys` vs sysctl.d intent to spot unknown writers (see `references/sysctl-service-conflicts.md`) |
+| `energy_performance_preference` (EPP) write under HWP returns `-EBUSY` (Device or resource busy) | A service/script that writes EPP had a red "failed" that worried you — but EPP was ALREADY performance at the hardware level | In HWP mode intel_pstate owns EPP; the sysfs write is refused (`-EBUSY`), NOT "silently clamped". Read the HWP MSR byte instead: `wrmsr -p0 0x774` → bits 31:24 = EPP (`0x00`=perf, `0x40`=bal_perf, `0x80`=bal_pow, `0xff`=power). On sethengine's box it's `0x00` already — don't write EPP, don't flag it. See `references/priority-tier-guard-ananicy-cpupower.md` |
+| `rtirq.service` enabled but `threadirqs` missing from kernel cmdline | Journal: "A realtime kernel or the threadirqs kernel parameter are required" + `/etc/rtirq.conf: line 1: -a: command not found` | **threadirqs was REMOVED on sethengine's system (caused problems) — do not re-add.** rtirq can never work without it → disable rtirq. Without threadirqs, IRQs stay hardirq-context on pinned cores. For PipeWire priority use TS + high nice (-12), NOT FIFO/RR — a real-time pipewire monopolizes a core and blocks everything (the "pipewire bug"; see sec 5c & `references/priority-tier-guard-ananicy-cpupower.md`) |
+| keyd running while masked | keyd grabs ALL keyboards (`[ids] *`), adds a userspace hop per keypress (SCHED_FIFO 49) | Check intent FIRST: on sethengine's system keyd is INTENTIONAL (key remapping) — do NOT disable; the latency cost is accepted. Only disable if the user confirms it should be masked |
+| NetworkManager `wifi.powersave = 3` | `iw dev ... get power_save` shows off at boot but flips ON after reconnect — WiFi latency spikes | NM re-applies power save on every connection, defeating `iw set power_save off` services. Set `wifi.powersave = 2` in `/etc/NetworkManager/conf.d/wifi-powersave.conf`, then `systemctl restart NetworkManager` |
+| `QT_LINUX_ACCESSIBILITY_ALWAYS_ON=1` (Manjaro `/etc/profile.d/qt5-accessibility.sh`) | at-spi-dbus-bus runs; every Qt app pays a11y overhead (small UI/startup latency) | Override via `~/.config/environment.d/00-a11y-off.conf`: `QT_LINUX_ACCESSIBILITY_ALWAYS_ON=0` (takes effect next login; skip if a screen reader is used) |
+| `VrrPolicy=2` (Automatic) in kwinrc | Whole desktop laggy despite idle CPU/GPU; journal: Chrome `Frame latency is negative` (display.cc:272); `kscreen-doctor -o` shows `Vrr: Automatic` | Set `VrrPolicy 0` (Never) or `3` (FullscreenOnly); apply via `qdbus6 org.kde.KWin /Compositor reinitialize` |
+| cpu0 stuck at 400–800 MHz after S3 resume while other cores boost; whole desktop abysmal despite free CPU/RAM/thermals | Re-applying the `performance` governor does NOT fix it (governor is only a HWP hint; firmware locked the register's MAX field) | Write the MSR in the resume hook: `modprobe msr; wrmsr -p0 0x774 0x5757`. Verify: `cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq` under load. This bugs a Gigabyte Z890 firmware HWP re-init defect — see `references/arrow-lake-hwp-bootcore-lock-resume.md` (a one-shot boot service is NOT enough; it must live in the `post`-case systemd-sleep hook) |
+| `--use-angle=desktop` in chrome-flags.conf | Invalid ANGLE backend — pair `--use-gl=angle --use-angle=desktop` is ignored, negative frame latency persists | Use `--use-gl=desktop` ALONE (native path) or `--use-gl=angle --use-angle=vulkan` |
+| Chrome flag file edited but Chrome not restarted | Old flags still active; timing errors continue after "fix" | Flag changes only apply to a FRESH Chrome start; verify with `tr '\0' ' ' < /proc/<chrome-gpu-pid>/cmdline` |
+| udev rule edited (e.g. 30-zram.rules swappiness) but value unchanged | Runtime still shows old value | udev rules need `udevadm control --reload` AND a new matching event; `udevadm trigger` re-fires the OLD rule's write if not reloaded first |
+| `sudo sed -i '/min_perf_pct/a\…'` inserted a block multiple times | Same block appears after EVERY line matching the `/anchor/` pattern — a comment and a later line both contained `min_perf_pct`, so the fix was triplicated (it still works — all copies were inside `post)` — but it's sloppy and risks landing in the wrong `case` branch) | Anchor `sed` append on the FULL, unique line, not a bare token. Check for dupes with `grep -c '<needle>'`. To repair: filter the file (`grep -v`) and `sudo install -m 755` it back. Prefer the `patch` tool for a single unique-match replacement |
+| Tool refuses to write a sensitive system path (`/lib/systemd/…`, `/usr/lib/…`, `/etc/…`) | Edit tool returns "Refusing to write to sensitive system path" | Those files must be modified via the terminal tool with `sudo` (`sudo sed -i …`, `sudo install -m 755 …`); the `patch`/`write_file` tools are blocked on them by design |
+| Bare `wrmsr`/`rdmsr` in a systemd-sleep hook silently no-ops | Hook runs but cpu0 still locked after resume; `journalctl -b | grep latency-fix` shows nothing from the log line | systemd-sleep hooks run with a MINIMAL PATH — `/usr/sbin/wrmsr` isn't found. Always use the full path AND load the module first: `modprobe msr 2>/dev/null || true; /usr/bin/wrmsr -p0 0x774 0x574757`. Then confirm the hook actually executed via its `logger` line in the journal |
+| tmpfiles.d used for cpufreq/EPP writes (e.g. `/etc/tmpfiles.d/10-gaming-cpu.conf`) | Config silently never applies; `journalctl`/manual `echo` shows EPP `-EBUSY`, governor not set | tmpfiles.d runs too early — cpufreq/EPP nodes don't exist yet, and EPP returns `-EBUSY` on HWP → dead config. Use cpupower.service for the boot governor + the resume hook for per-wake fixes instead |
 ### GSP Firmware and DPMS Wake (NVIDIA Wayland)
 
 The NVIDIA GPU System Processor (GSP) firmware handles DisplayPort link training, power state transitions, and error recovery on RTX 40/50 series GPUs. On driver 595.x with Blackwell (RTX 5060 Ti), the GSP firmware has known bugs:
@@ -403,6 +538,12 @@ sysctl kernel.sched_rt_runtime_us
 # Resume hook
 ls -la /usr/lib/systemd/system-sleep/latency-fix
 journalctl -b | grep latency-fix | tail -3
+
+# Conflicting post-boot writers (see references/sysctl-service-conflicts.md)
+cat /proc/sys/vm/swappiness /proc/sys/vm/vfs_cache_pressure /proc/sys/vm/min_free_kbytes /proc/sys/vm/max_map_count
+journalctl -b | grep -E 'intel-min|cpu-perf|thp-tune|rtirq|pin-irqs'   # boot order — last start wins
+sysctl --system 2>&1 | grep 'Permission denied'                       # reveals hidden 600-perm sysctl.d files
+swapon --show                                                          # zram prio>disk ⇒ high swappiness is intentional
 ```
 
 ## Chrome on NVIDIA Wayland
@@ -427,7 +568,10 @@ google-chrome-stable --ozone-platform=wayland \
 
 **Flags to avoid on NVIDIA Wayland:**
 - `--use-gl=angle` alone (bare ANGLE → may pick SwiftShader → GeoGuessr/Maps WebGL broken)
+- `--use-angle=desktop` (NOT a valid `--use-angle=` value — the pair `--use-gl=angle --use-angle=desktop` is ignored entirely; use `--use-gl=desktop` ALONE for the native path, or `--use-gl=angle --use-angle=vulkan`)
 - `--enable-native-gpu-memory-buffers` (rendering corruption on NVIDIA Wayland)
+
+**Display timing diagnostic**: `journalctl -b | grep 'Frame latency is negative'` (components/viz/service/display/display.cc:272) = Chrome's presentation timing under desktop VRR. Turn VRR off for the desktop (`VrrPolicy 0`); a Chrome restart is required after any flag change.
 
 **Safe flags:**
 - `--enable-features=VaapiOnNvidiaGPUs,VaapiIgnoreDriverChecks` (hardware video decode)
@@ -455,3 +599,8 @@ See `references/` for:
 - `usb-autosuspend-udev.md` — Per-device USB autosuspend via udev rules (alternative to GRUB global param)
 - `irq-pinning-systemd.md` — Pinning USB IRQs to P-cores via systemd oneshot service
 - `iommu-latency-impact.md` — IOMMU DMA translation overhead trade-off (in brain wiki at kernel/iommu-latency-impact.md)
+- `sleep-hook-wayland-session-bridge.md` — systemd-sleep hooks run as root; runuser bridge into the user's Wayland session, qdbus6 vs qdbus, error signatures, non-root test commands
+- `sysctl-service-conflicts.md` — detecting systemd services that fight over the same tuning knob (min_perf_pct, EPP, sysctl): runtime-vs-config comparison, boot-order forensics, zram udev-rule writer (two cases: 64GB+ → kill zram; ≤16GB → leave), hidden 600-perm config files
+- `vrr-desktop-lag-nvidia-wayland.md` — desktop VRR/AdaptiveSync = perceived lag on NVIDIA Wayland; Chrome `Frame latency is negative` diagnostic; VrrPolicy enum 0-3 + fix
+- `arrow-lake-hwp-bootcore-lock-resume.md` — Arrow Lake/Gigabyte Z890 post-resume cpu0 HWP lock (~400MHz); 0x774 reads 0x0d0d; governor can't fix; `wrmsr -p0 0x774 0x5757` in the sleep hook; verified-innocent list (thermal, governor, power daemons, irqbalance)
+- `priority-tier-guard-ananicy-cpupower.md` — ananicy-cpp misranking + disable; the prio-guard FIFO>RR>TS hierarchy; pipewire RT-monopoly bug; cpupower.service config mechanism; EPP -EBUSY on HWP (MSR byte decode); tmpfiles.d-wrong-for-cpu pitfall

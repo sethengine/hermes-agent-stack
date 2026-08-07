@@ -303,7 +303,18 @@ NVIDIA HDA audio (PCI 02:00.1) generates constant INTR-REMAP faults with intel_i
 - **Custom EDID firmware rejected by NVIDIA** — 128-byte files are incomplete. Valid EDID is 256 bytes (EDID 1.3+). Check with `sudo dmesg | grep "Invalid firmware EDID"`. Fix or remove the `drm.edid_firmware=` parameter.
 - **ModemManager running on desktop with no cellular modem** — 8+ MB wasted. `sudo systemctl disable --now ModemManager`
 
+## Exhaustive "every parameter" audit — user's explicit requirements
+
+When the user asks to audit **"every parameter," "check each one," /sys/kernel, /proc, /sys/devices** — do NOT scope down to "the params that are set in config files." The user wants the FULL tunable surface of the system, however large ("10,000 params is fine, even /sys/kernel"). These are hard requirements observed this session; violating them triggers repeated corrections:
+
+- **Cover every parameter that exists, not just customized ones.** Include all ~3570 sysctl (even per-interface `net.*`), every `/sys/kernel/*` writable file, debugfs (`/sys/kernel/debug/sched/features`), `/sys/devices/.../cpufreq` + `cpuidle` per core, `/sys/block/*/queue`, cgroup v2, THP, cmdline, modprobe.d, KWin, gamemode, udev/hwdb, env vars (all sources), docker daemon.json. Untouched defaults are part of the surface too.
+- **Research the BEST value per parameter online and cite a real source URL — do NOT give your own opinion/takeaway for each.** Authoritative sources (kernel.org, Arch Wiki, Red Hat, NVIDIA forums, CachyOS) only; if none exists, say "no authoritative source found." Giving opinion instead of researched answers is a direct, repeated complaint.
+- **Plan first, complete, then execute, and take the whole thing beginning-to-end — never start "mid-way" or resume mid-pass.**
+- **Deliverable: per-surface `| Parameter | Current | Best Option | Source URL | Apply? |` tables, then a consolidated `Recommended Changes` section (Apply?=yes only) with exact file + change.** Manual-execution only, await approval before applying.
+- For the critical surface, **collect a baseline to disk** (`/home/sethengine/audit/baseline/`) then **delegate research+writing to a subagent** rather than holding thousands of values in context. Reuse the collector at `scripts/collect_baseline.sh` (in `linux-latency-tuning` / this skill's scripts dir).
+
 ## References
+- scripts/collect_baseline.sh — full current-value baseline collector for exhaustive "every parameter" audits
 - references/pipewire-audio-diagnostics.md — PipeWire + DMAR fix patterns
 - references/gigabyte-z890-bios-stability.md — BIOS settings
 - references/chrome-nvidia-wayland-screen-blanking.md — KDE 6 + Chrome wake failures

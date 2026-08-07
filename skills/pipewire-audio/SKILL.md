@@ -736,6 +736,10 @@ cat /proc/asound/card1/codec#0
 
 - **EasyEffects SIGABRT from corrupted INI-as-JSON preset** — EE stores presets as JSON in `~/.local/share/easyeffects/output/*.json`. If a file has a `.json` extension but contains INI-format data, EE throws a parse error and crashes. Symptom: `presets_manager.cpp parse error at line 1, column 2: invalid literal`. Fix: delete the corrupted file and verify with `head -c1 <file> | grep -q "{"`.
 
+## References
+
+- `references/easyeffects-game-audio-blocklist.md` — Per-application EasyEffects DSP bypass via `blocklist.json` to eliminate 5-15ms filter latency for competitive gaming. Covers blocklist format, Steam/dota2 entries, verification, and trade-offs vs disabling CPU-heavy plugins.
+
 ## Related Skills
 
 - `skill_view(name=alc1220-audio-config)` — Gigabyte Z890 AERO G specific: error transcripts, LLM context, full config file mirror on GitHub

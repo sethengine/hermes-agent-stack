@@ -5,6 +5,28 @@ description: Full-stack Linux desktop latency tuning — GRUB kernel params, USB
 
 # Linux Latency Tuning
 
+## Background Game Mouse Lag — Priority + Compositor, NOT Memory/TLB
+
+**Refines the older "resource exhaustion" model.** A backgrounded game causes system-wide mouse lag
+via two load-independent mechanisms, even at low load (20 cores, 36GB free, idle swap, GPU 6%):
+1. **Priority inversion on the input path** — a game at `NI -5` (boosted below normal) is scheduled
+   ahead of KWin's input thread on contention; its wakeups widen scheduler jitter system-wide.
+2. **Compositor present queue / zombie-window cliff (~3ms LDAT)** — a non-occluded, non-minimized
+   backgrounded game keeps submitting GPU presents, shrinking KWin's serial composite schedule for
+   every other client including the pointer.
+
+**Memory/TLB are red herrings** when RAM is free: no reclaim, DRAM bandwidth far from saturated,
+TLB is per-core (no cross-core pollution), cost is nanoseconds, THP `[always]` already compresses it.
+
+Diagnosis: `ps -eo pid,comm,%cpu,pri,ni --sort=-%cpu | head` — look for boosted (NI negative) game
+threads; check if a game presents while unfocused.
+
+Fixes (global): raise the game's nice above normal (`nice 10` or GameMode `gamemoderun %command%`),
+minimize/move-to-other-virtual-desktop when unfocused (LDAT-verified biggest win), strict MangoHud
+`fps_limit`, `LatencyPolicy=LatencyLow` + `KWIN_DRM_OVERRIDE_SAFETY_MARGIN=-150`.
+
+Brain node: `background_game_mouse_lag_priority_compositor`.
+
 ## Process
 1. **Audit current state first** — GRUB cmdline, CPU governor, C-states, USB HID polling, MOUSE_POLL, KWin compositing, sysctl, NVIDIA state, services (PPD, keyd, irqbalance), hugepages, env vars.
 2. **Check ALL before proposing** — never guess. Run `cat /proc/cmdline`, `libinput list-devices`, `sysctl <param>`, `nvidia-smi` etc.
@@ -87,6 +109,36 @@ kernel.hung_task_timeout_secs = 0
 kernel.sched_rt_runtime_us = -1
 ```
 Apply: `sudo sysctl --system`
+
+## zram / Swap Pressure (silent stutter source on 64GB systems)
+
+CachyOS/Arch ship **zram-generator** plus a udev rule (`/usr/lib/udev/rules.d/30-zram.rules`) that forces `vm.swappiness=150`. On RAM-rich systems this actively hurts: the kernel pushes idle AND game pages into compressed swap for no reason → stutter. Real case: Dota2 had 1.25 GB in zram while 38 GB RAM was free; 8 GB total had been swapped. On 64 GB, zram has no point — it's a distro default for small-RAM machines.
+
+Diagnosis:
+```bash
+swapon --show                      # zram0 present? how much used?
+cat /proc/sys/vm/swappiness        # 150 => zram udev rule active
+grep -rn 'SYSCTL{' /etc/udev/rules.d/ /usr/lib/udev/rules.d/   # find the writer
+```
+
+**Why the value "flips back" to 150:** udev loads rules only at EVENT time. Editing/replacing a rule file does nothing until `udevadm control --reload` AND a new matching event fires. The boot-time zram event already ran with the old rule, so the value stays 150. Worse, a bare `udevadm trigger` re-fires the file CURRENTLY installed — if the original 150 rule still exists, trigger re-applies 150. Fix order matters.
+
+Permanent fix (shadow the rule + kill the generator):
+```bash
+# 1. Shadow the 150 rule with the same filename (later lexicographic order wins)
+sudo tee /etc/udev/rules.d/30-zram.rules <<'EOF'
+ACTION=="change", KERNEL=="zram0", ATTR{initstate}=="1", SYSCTL{vm.swappiness}="10"
+EOF
+sudo udevadm control --reload
+# 2. Remove zram from swap and stop it permanently
+sudo swapoff /dev/zram0
+sudo systemctl mask systemd-zram-setup@zram0.service
+sudo touch /etc/systemd/zram-generator.conf   # CRITICAL: empty /etc file overrides /usr/lib
+#    Without this the generator recreates zram+swap at next boot — disable alone is NOT enough
+```
+Verify next boot: `swapon --show` shows only the disk partition; `ls /run/systemd/generator/ | grep zram` is empty.
+
+See `references/zram-swap-audit.md` for the full diagnosis transcript and the udev/sysctl broken-rule tables.
 
 ## KWin Compositor
 
@@ -213,6 +265,17 @@ Use native EGL instead of ANGLE for lower latency:
 ```
 google-chrome-stable --use-gl=egl --ozone-platform=wayland
 ```
+
+## Backup / Redeploy of the Tuning Stack
+
+Every file this skill tunes (`/etc/sysctl.d/*`, `/lib/systemd/system-sleep/latency-fix`, `/usr/local/bin/*`, the cpu0 boot service, `/etc/default/cpupower-service.conf`) is versioned into the dotfiles GitHub repo as a **real-path `system/` mirror** (`~/.dotfiles/system/...` — e.g. `system/lib/systemd/system-sleep/latency-fix`), refreshed on every backup run by `sync_system_files()` in `~/.dotfiles/backup.sh`. A `$HOME`-relative manifest like `dotfiles.txt` can't carry these, hence the mirror + a dedicated restore script.
+
+To (re)deploy the whole stack on a fresh machine AFTER `restore.sh --apply`:
+```bash
+sudo bash ~/.dotfiles/restore-system.sh   # installs files to /, enables cpu0 boot service,
+                                          # reapplies cpu0 HWP + sysctl + IRQ pin + prio guard now
+```
+`restore.sh --apply` only restores `$HOME` configs — it never touches `/etc`, `/usr`, `/lib`. Always run `restore-system.sh` too.
 
 ## Verification Commands
 
@@ -424,6 +487,17 @@ This comprehensive approach matches the user's expectation of "give me everythin
 - **GRUB parameter concatenation**: The `GRUB_CMDLINE_LINUX_DEFAULT` line is a single string. Missing a space between two adjacent params merges them into one invalid parameter. This silently falls back to the default, not a visible error. Always verify spacing around every parameter boundary after editing `GRUB_CMDLINE_LINUX_DEFAULT`. Check with `cat /sys/module/pcie_aspm/parameters/policy` (should show `[performance]`). Fix: `sudo sed -i 's/bad_merged_params/good spaced params/' /etc/default/grub && sudo grub-mkconfig -o /boot/grub/grub.cfg`.
 - **PipeWire config conflicts across multiple directories**: `~/.config/pipewire/pipewire.conf.d/`, `~/.config/pipewire/pipewire-pulse.conf.d/`, and `~/.config/pipewire/` can all set different `quantum`, `min-quantum`, and `force-quantum` values. The `force-quantum` in `pipewire.conf.d/` overrides everything else. Always check ALL directories for conflicting values using `grep -rn 'quantum\|period-size\|force.quantum' ~/.config/pipewire/ /etc/pipewire/ 2>/dev/null | grep -v '^\s*#'` and `pw-metadata -n settings | grep quantum`.
 - **NVMe power control defaults to `auto`**: Both NVMe drives have `power/control=auto`, permitting power state transitions (PS2/PS3 → PS0) on every I/O. On a latency-tuned system, set to `on` via udev rule or manually: `for d in /sys/bus/pci/devices/*/nvme/nvme*/power/control; do echo on > "$d" 2>/dev/null; done`. Check current state: `find /sys/devices/pci* -name "nvme*" -type d 2>/dev/null | while read nvme; do echo "$nvme: power/control=$(cat $nvme/power/control 2>/dev/null)"; done`.
+
+- **zram-generator recreates zram at every boot**: `systemctl disable systemd-zram-setup@zram0.service` is NOT enough — the generator reads `/usr/lib/systemd/zram-generator.conf` (CachyOS: zram-size=ram) and recreates the device + swap each boot. The permanent kill is `touch /etc/systemd/zram-generator.conf` (empty /etc config overrides /usr/lib) + `systemctl mask systemd-zram-setup@zram0.service` + `swapoff /dev/zram0`. Verify after reboot: `swapon --show` shows only the disk partition.
+- **udev rules only apply at event time**: Editing/replacing a rule file does NOT apply it. You need `sudo udevadm control --reload` AND a new matching udev event. A bare `udevadm trigger` re-fires whatever rule files are CURRENTLY installed — so if the original 150-swappiness rule still exists, trigger re-applies 150. This is why "I changed the rule but the value is still 150".
+- **NVMe udev rules must match the namespace, not the controller**: `KERNEL=="nvme[0-9]*"` matches `nvme0` (the controller), which has NO `queue/scheduler` or `queue/read_ahead_kb` → "Could not chase sysfs attribute" error every boot, rule silently does nothing. Use `KERNEL=="nvme[0-9]n[0-9]*"` (e.g. `nvme0n1`). Detect broken rules: `journalctl -b | grep 'udev-worker.*Could not chase'` and aggregate by `rules.d/<file>:<line>`.
+- **sysctl.d later-file-wins (silent overrides)**: Files in `/etc/sysctl.d/` override lexicographically — the LAST file alphabetically wins per key, regardless of intent. Always check the runtime value vs ALL files, not just the file you think sets it. Real cases: `99-workstation.conf` (vfs_cache_pressure=100) silently overrode `99-performance.conf` (50); `99-performance.conf` (max_map_count=262144) overrode Manjaro's `10-manjaro.conf` (1048576). Verify: `sysctl <key>` then `grep -rn '<key>' /etc/sysctl.d/`.
+- **Dead sysctl keys on kernel 7.x (EEVDF)**: `kernel.sched_child_runs_first` and `kernel.pressure_stall.max_*` no longer exist — writes fail with "No such file or directory" and are harmless log noise. Remove from sysctl.d to silence.
+- **kernel.watchdog=0 removes the last per-core wakeup**: with nmi_watchdog already 0, the softlockup watchdog threads still wake every core periodically (watchdog_cpumask=0-19). `kernel.watchdog=0` kills those too — trade-off is losing softlockup detection, acceptable on a gaming desktop.
+- **net.core.netdev_budget_usecs=4000 is 2x default**: network softirq may hog 4ms per round on the NIC's IRQ CPU. Harmless for USB input (hardirqs preempt softirqs) but on online games it can delay the game thread if it shares the NIC's core. Default 2000; tighten if NIC IRQs share cores with the game.
+- **tmpfiles.d can't tune cpufreq — it runs before the sysfs nodes exist**: `/etc/tmpfiles.d/10-gaming-cpu.conf` writing `scaling_governor`/`energy_performance_preference` is a silent no-op (nodes absent at tmpfiles time; EPP also gets `-EBUSY` under HWP). Audit: dead tuning configs accumulate silently. Check for them with `systemd-tmpfiles --create --dry-run` or just verify whether the target sysfs actually changed after boot.
+- **`net.ipv4.tcp_low_latency=1` is a dead sysctl** — the knob was removed from the kernel years ago; the line in `99-performance.conf` is silently ignored. Before re-proposing any TCP tuning, check the key still exists (`sysctl -a | grep` the key or write it and watch for "unknown key").
+- **Resume-hook vs sysctl.d value conflict**: resume hook step 4 set `vm.dirty_ratio=5` on every wake while `99-vm-tune.conf` sets 10 — the value flips between 10 and 5 depending on last suspend. Rule: one owner per tunable. If a sysctl.d file is canonical, the hook must NOT override it; audit hooks against sysctl.d for every key they touch.
 
 ## User Preferences (for this system)
 - No clarifying questions — give ALL commands immediately. "a" = yes/continue.
