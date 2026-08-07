@@ -77,10 +77,11 @@ exec zsh
 1. Copies all tracked files from `$HOME` into `~/.dotfiles/`
 2. Excludes `.git` dirs and ignores theme repos (114M of alacritty themes)
 3. **Syncs directories** — removes orphaned files in the backup that no longer exist on the live system
-4. **Redacts secrets** from `.env` files (API keys, tokens, passwords) before commit
-5. Commits with a timestamped message listing changed files
-6. Appends a log entry to `LOG.md`
-7. Pushes to GitHub if remote is configured
+4. **Syncs system files** — mirrors the non-$HOME root files (cpu0 HWP fix, IRQ pinning, priority guard, cpupower, sysctl) into the `system/` tree via `sync_system_files()`
+5. **Redacts secrets** from `.env` files (API keys, tokens, passwords) before commit
+6. Commits with a timestamped message listing changed files
+7. Appends a log entry to `LOG.md`
+8. Pushes to GitHub if remote is configured
 
 ## Restore Script
 
@@ -89,10 +90,15 @@ exec zsh
 - `--apply` — copies files from repo back to `$HOME`, backs up existing files as `.bak.<timestamp>`
 - `--list` — shows all files in the repo and git log
 
-## Cron Jobs
+For the system latency-tuning files (in `system/`), use `sudo bash ~/.dotfiles/restore-system.sh` — it deploys them to `/lib`, `/etc`, `/usr/local/bin` and enables the boot service.
 
-- **`dotfile-backup`**: Daily at 6:00 AM — runs `~/.dotfiles/backup.sh` via no_agent cron
-- **`github-stack-sync`**: Daily at 5:00 AM — backs up Hermes configs/skills/sessions to `github.com/sethengine/hermes-agent-stack`
+## Cron Jobs (automation — redundant, both active)
+
+- **systemd user timer `dotfiles-backup.timer`** — `OnCalendar=daily` (midnight), `Persistent=true`, runs `%h/.dotfiles/backup.sh`. This is the primary automation. Confirmed active.
+- **Hermes cron `dotfile-backup`** — daily at **12:00**, runs the same `backup.sh` for redundancy (different time, so a missed midnight still gets a noon backup).
+- **Hermes cron `github-stack-sync`** — daily, backs up Hermes configs/skills/sessions/memory/brain to `github.com/sethengine/hermes-agent-stack`.
+
+> Note: `backup.sh` also mirrors the system latency-tuning files into `system/` on every run, so both cron automations keep those current automatically.
 
 ## Files
 
